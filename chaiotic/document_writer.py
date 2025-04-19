@@ -1,6 +1,7 @@
 """Module for saving documents with corrections."""
 
 import os
+import datetime
 from typing import List, Dict, Any
 
 from docx.oxml.shared import OxmlElement, qn
@@ -9,8 +10,8 @@ from utils.text_utils import FuzzyMatcher, generate_full_text_from_corrections
 
 def save_document(file_path: str, corrections: List[Dict[Any, Any]], original_doc=None, is_docx: bool = True) -> str:
     """
-    Save the document with corrections as Word comments.
-    This function preserves the original document and adds review comments.
+    Save the document with corrections as Word comments or ODT tracked changes.
+    This function preserves the original document and adds review comments/changes.
     
     Args:
         file_path: Path to the original document
@@ -71,22 +72,9 @@ def save_document(file_path: str, corrections: List[Dict[Any, Any]], original_do
                 print(f"Failed to save document: {str(e2)}")
                 raise
     else:
-        # Handle ODT files - fallback to basic text format
-        print("Note: Word comments are not supported for ODT files.")
-        output_path = file_base + "_corrected.txt"
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("CORRECTION SUGGESTIONS:\n\n")
-            for i, correction in enumerate(corrections, 1):
-                if isinstance(correction, dict):
-                    original = correction.get('original', 'N/A')
-                    corrected = correction.get('corrected', 'N/A')
-                    explanation = correction.get('explanation', 'No explanation provided')
-                    f.write(f"{i}. ORIGINAL: {original}\n")
-                    f.write(f"   CORRECTED: {corrected}\n")
-                    f.write(f"   EXPLANATION: {explanation}\n\n")
-        
-        print(f"Saved corrections to text file: {output_path}")
+        # Handle ODT files with tracked changes
+        print("Processing ODT file with tracked changes...")
+        output_path = apply_corrections_to_odt(file_path, corrections, output_path)
         return output_path
 
 def save_correction_outputs(file_path, corrections, original_doc, is_docx=True):
@@ -159,9 +147,13 @@ def save_correction_outputs(file_path, corrections, original_doc, is_docx=True):
     
     # Save corrected document file
     try:
-        # Use the apply_corrections_to_document function from this module
-        corrected_doc = apply_corrections_to_document(original_doc, corrections_list, is_docx)
-        corrected_doc.save(doc_path)
+        if is_docx:
+            # Use the apply_corrections_to_document function from this module
+            corrected_doc = apply_corrections_to_document(original_doc, corrections_list)
+            corrected_doc.save(doc_path)
+        else:
+            # For ODT, apply corrections with tracked changes
+            apply_corrections_to_odt(file_path, corrections_list, doc_path)
     except Exception as e:
         print(f"Error saving corrected document: {e}")
         print("Falling back to basic text document creation...")
@@ -180,6 +172,472 @@ def save_correction_outputs(file_path, corrections, original_doc, is_docx=True):
             print(f"Error creating basic document: {e2}")
     
     return json_path, text_path, doc_path
+
+def apply_corrections_to_odt(file_path, corrections, output_path):
+    """Apply corrections to an ODT document with tracked changes.
+    
+    Args:
+        file_path: Path to the original ODT document
+        corrections: List of corrections to apply
+        output_path: Path to save the corrected document
+        
+    Returns:
+        Path to the saved document
+    """
+    import zipfile
+    import shutil
+    import tempfile
+    import xml.etree.ElementTree as ET
+    from datetime import datetime
+    
+    # Try to use lxml if available for better XML handling
+    try:
+        import lxml.etree as LET
+        USE_LXML = True
+        print("Using lxml for better XML handling")
+    except ImportError:
+        USE_LXML = False
+        print("lxml not available, using standard xml.etree.ElementTree")
+    
+    # Register XML namespaces
+    ET.register_namespace('text', 'urn:oasis:names:tc:opendocument:xmlns:text:1.0')
+    ET.register_namespace('office', 'urn:oasis:names:tc:opendocument:xmlns:office:1.0')
+    ET.register_namespace('style', 'urn:oasis:names:tc:opendocument:xmlns:style:1.0')
+    ET.register_namespace('fo', 'urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0')
+    ET.register_namespace('dc', 'http://purl.org/dc/elements/1.1/')
+    
+    # Create a temporary directory for ODT manipulation
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Extract ODT file (it's a ZIP file)
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            
+            # Parse content.xml
+            content_file = os.path.join(temp_dir, 'content.xml')
+            
+            if USE_LXML:
+                # Parse with lxml for better XML handling
+                parser = LET.XMLParser(remove_blank_text=True)
+                tree = LET.parse(content_file, parser)
+                root = tree.getroot()
+                
+                # Define namespaces for lxml
+                ns = {
+                    'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0',
+                    'office': 'urn:oasis:names:tc:opendocument:xmlns:office:1.0',
+                    'dc': 'http://purl.org/dc/elements/1.1/'
+                }
+                
+                # Find office:text element
+                office_text = root.find('.//office:text', ns)
+                if office_text is None:
+                    raise ValueError("Could not find office:text element in ODT file")
+                
+                # Create tracked-changes element if it doesn't exist
+                tracked_changes = office_text.find('.//text:tracked-changes', ns)
+                if tracked_changes is None:
+                    tracked_changes = LET.SubElement(office_text, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes')
+                    
+                    # Add tracked-changes as the first child of office:text
+                    # This is important for LibreOffice to recognize the changes properly
+                    office_text.remove(tracked_changes)
+                    office_text.insert(0, tracked_changes)
+                
+                # Get all paragraphs
+                paragraphs = root.findall('.//text:p', ns)
+                print(f"Found {len(paragraphs)} paragraphs in ODT document")
+                
+                # Get current time for tracked changes
+                now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                user = "Chaiotic Grammar Checker"
+                
+                # Generate unique change IDs
+                change_id_counter = 1
+                
+                # Group corrections by paragraph
+                corrections_by_paragraph = {}
+                
+                # First pass - Find all corrections and create changed_region entries
+                for i, para in enumerate(paragraphs):
+                    # Get the full text content of this paragraph using lxml's proper handling of nested elements
+                    para_text = "".join(para.xpath('.//text()'))
+                    para_id = f"p{i+1}"
+                    
+                    # Check if any corrections apply to this paragraph
+                    applicable_corrections = []
+                    for correction in corrections:
+                        original = correction.get('original', '')
+                        if original and original in para_text:
+                            # Add the starting position to sort corrections later
+                            start_idx = para_text.find(original)
+                            applicable_corrections.append({
+                                'original': original,
+                                'corrected': correction.get('corrected', ''),
+                                'explanation': correction.get('explanation', ''),
+                                'start_idx': start_idx,
+                                'end_idx': start_idx + len(original)
+                            })
+                    
+                    if applicable_corrections:
+                        # Sort corrections by their position in reverse order (end to beginning)
+                        applicable_corrections.sort(key=lambda x: x['start_idx'], reverse=True)
+                        corrections_by_paragraph[para_id] = applicable_corrections
+                        
+                        print(f"Found {len(applicable_corrections)} corrections for paragraph {para_id}, "
+                              f"applying from end to beginning")
+                        
+                        # Process each correction and create change regions
+                        for correction in applicable_corrections:
+                            original = correction['original']
+                            corrected = correction['corrected']
+                            
+                            # Create a change ID
+                            change_id = f"ct{change_id_counter}"
+                            change_id_counter += 1
+                            correction['change_id'] = change_id
+                            
+                            # Create changed region
+                            changed_region = LET.Element('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}changed-region')
+                            changed_region.set('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}id', change_id)
+                            
+                            # Create deletion
+                            deletion = LET.SubElement(changed_region, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}deletion')
+                            
+                            # Add creator and date to deletion
+                            creator = LET.SubElement(deletion, '{http://purl.org/dc/elements/1.1/}creator')
+                            creator.text = user
+                            date = LET.SubElement(deletion, '{http://purl.org/dc/elements/1.1/}date')
+                            date.text = now
+                            
+                            # Create the deleted content properly
+                            del_p = LET.SubElement(deletion, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p')
+                            del_p.text = original
+                            
+                            # Create insertion
+                            insertion = LET.SubElement(changed_region, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}insertion')
+                            
+                            # Add creator and date to insertion
+                            creator = LET.SubElement(insertion, '{http://purl.org/dc/elements/1.1/}creator')
+                            creator.text = user
+                            date = LET.SubElement(insertion, '{http://purl.org/dc/elements/1.1/}date')
+                            date.text = now
+                            
+                            # Create the inserted content properly
+                            ins_p = LET.SubElement(insertion, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p')
+                            ins_p.text = corrected
+                            
+                            # Add the changed region to tracked-changes
+                            tracked_changes.append(changed_region)
+                
+                # Second pass - Apply changes to paragraphs
+                for para_id, para_corrections in corrections_by_paragraph.items():
+                    # Get paragraph index from ID (p1 -> 0, p2 -> 1, etc.)
+                    para_index = int(para_id[1:]) - 1
+                    para = paragraphs[para_index]
+                    
+                    # Get the full text of the paragraph
+                    para_text = "".join(para.xpath('.//text()'))
+                    
+                    # Create a new paragraph to replace the old one
+                    new_para = LET.Element(para.tag, attrib=para.attrib)
+                    
+                    # Track positions of changes for insertion
+                    change_positions = []
+                    
+                    # Apply corrections in reverse order (from end to beginning)
+                    for correction in para_corrections:
+                        original = correction['original']
+                        start_idx = correction['start_idx']
+                        end_idx = correction['end_idx']
+                        change_id = correction['change_id']
+                        
+                        # Record the position and change ID
+                        change_positions.append({
+                            'start': start_idx,
+                            'end': end_idx,
+                            'id': change_id,
+                            'corrected': correction['corrected']
+                        })
+                    
+                    # Sort by start position (regular order for reconstruction)
+                    change_positions.sort(key=lambda x: x['start'])
+                    
+                    # Rebuild the paragraph with changes
+                    last_pos = 0
+                    for change in change_positions:
+                        # Add text before the change
+                        if change['start'] > last_pos:
+                            before_text = para_text[last_pos:change['start']]
+                            if last_pos == 0:
+                                new_para.text = before_text
+                            else:
+                                span = LET.SubElement(new_para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                                span.text = before_text
+                        
+                        # Add the change reference
+                        change_element = LET.SubElement(new_para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}change')
+                        change_element.set('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}change-id', change['id'])
+                        
+                        # Add the corrected text
+                        span = LET.SubElement(new_para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                        span.text = change['corrected']
+                        
+                        # Update position
+                        last_pos = change['end']
+                    
+                    # Add any remaining text after the last change
+                    if last_pos < len(para_text):
+                        span = LET.SubElement(new_para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                        span.text = para_text[last_pos:]
+                    
+                    # Replace the old paragraph with the new one
+                    parent = para.getparent()
+                    if parent is not None:
+                        parent.replace(para, new_para)
+                    
+                    print(f"Applied {len(para_corrections)} changes to paragraph {para_id}")
+                
+                # Write back the modified content.xml with lxml
+                tree.write(content_file, encoding='UTF-8', xml_declaration=True, pretty_print=True)
+                
+            else:
+                # Standard ElementTree implementation as fallback
+                tree = ET.parse(content_file)
+                root = tree.getroot()
+                
+                # Define namespaces
+                ns = {
+                    'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0',
+                    'office': 'urn:oasis:names:tc:opendocument:xmlns:office:1.0',
+                    'dc': 'http://purl.org/dc/elements/1.1/'
+                }
+                
+                # Find office:text element
+                office_text = root.find('.//office:text', ns)
+                if office_text is None:
+                    raise ValueError("Could not find office:text element in ODT file")
+                
+                # Create tracked-changes element if it doesn't exist
+                tracked_changes = office_text.find('.//text:tracked-changes', ns)
+                if tracked_changes is None:
+                    tracked_changes = ET.SubElement(office_text, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}tracked-changes')
+                    
+                    # Add tracked-changes as the first child of office:text
+                    office_text.remove(tracked_changes)
+                    office_text.insert(0, tracked_changes)
+                
+                # Get all paragraphs
+                paragraphs = office_text.findall('.//text:p', ns)
+                print(f"Found {len(paragraphs)} paragraphs in ODT document")
+                
+                # Get current time for tracked changes
+                now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                user = "Chaiotic Grammar Checker"
+                
+                # Generate unique change IDs
+                change_id_counter = 1
+                
+                # Group corrections by paragraph
+                corrections_by_paragraph = {}
+                
+                # First pass - Find all corrections and create changed_region entries
+                for i, para in enumerate(paragraphs):
+                    # For standard ElementTree, carefully rebuild the text content
+                    # to avoid nesting issues with para.itertext()
+                    para_parts = []
+                    
+                    # Get text directly in the paragraph
+                    if para.text:
+                        para_parts.append(para.text)
+                    
+                    # Process all child elements recursively
+                    for child in para.iter():
+                        if child != para:  # Skip the paragraph itself
+                            if child.text:
+                                para_parts.append(child.text)
+                            if child.tail:
+                                para_parts.append(child.tail)
+                    
+                    # Join all text parts
+                    para_text = "".join(para_parts)
+                    para_id = f"p{i+1}"
+                    
+                    # Check if any corrections apply to this paragraph
+                    applicable_corrections = []
+                    for correction in corrections:
+                        original = correction.get('original', '')
+                        if original and original in para_text:
+                            # Add the starting position to sort corrections later
+                            start_idx = para_text.find(original)
+                            applicable_corrections.append({
+                                'original': original,
+                                'corrected': correction.get('corrected', ''),
+                                'explanation': correction.get('explanation', ''),
+                                'start_idx': start_idx,
+                                'end_idx': start_idx + len(original)
+                            })
+                    
+                    if applicable_corrections:
+                        # Sort corrections by their position in reverse order (end to beginning)
+                        applicable_corrections.sort(key=lambda x: x['start_idx'], reverse=True)
+                        corrections_by_paragraph[para_id] = applicable_corrections
+                        
+                        print(f"Found {len(applicable_corrections)} corrections for paragraph {para_id}, "
+                              f"applying from end to beginning")
+                        
+                        # Process each correction and create change regions
+                        for correction in applicable_corrections:
+                            original = correction['original']
+                            corrected = correction['corrected']
+                            
+                            # Create a change ID
+                            change_id = f"ct{change_id_counter}"
+                            change_id_counter += 1
+                            correction['change_id'] = change_id
+                            
+                            # Create changed region
+                            changed_region = ET.Element('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}changed-region')
+                            changed_region.set('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}id', change_id)
+                            
+                            # Create deletion
+                            deletion = ET.SubElement(changed_region, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}deletion')
+                            
+                            # Add creator and date to deletion
+                            creator = ET.SubElement(deletion, '{http://purl.org/dc/elements/1.1/}creator')
+                            creator.text = user
+                            date = ET.SubElement(deletion, '{http://purl.org/dc/elements/1.1/}date')
+                            date.text = now
+                            
+                            # Create the deleted content properly
+                            del_p = ET.SubElement(deletion, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p')
+                            del_p.text = original
+                            
+                            # Create insertion
+                            insertion = ET.SubElement(changed_region, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}insertion')
+                            
+                            # Add creator and date to insertion
+                            creator = ET.SubElement(insertion, '{http://purl.org/dc/elements/1.1/}creator')
+                            creator.text = user
+                            date = ET.SubElement(insertion, '{http://purl.org/dc/elements/1.1/}date')
+                            date.text = now
+                            
+                            # Create the inserted content properly
+                            ins_p = ET.SubElement(insertion, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p')
+                            ins_p.text = corrected
+                            
+                            # Add the changed region to tracked-changes
+                            tracked_changes.append(changed_region)
+                
+                # Second pass - Apply changes to paragraphs
+                for para_id, para_corrections in corrections_by_paragraph.items():
+                    # Get paragraph index from ID (p1 -> 0, p2 -> 1, etc.)
+                    para_index = int(para_id[1:]) - 1
+                    para = paragraphs[para_index]
+                    
+                    # Rebuild paragraph text without using itertext()
+                    para_parts = []
+                    if para.text:
+                        para_parts.append(para.text)
+                    
+                    for child in para.iter():
+                        if child != para:  # Skip the paragraph itself
+                            if child.text:
+                                para_parts.append(child.text)
+                            if child.tail:
+                                para_parts.append(child.tail)
+                    
+                    para_text = "".join(para_parts)
+                    
+                    # Clear the existing paragraph content
+                    for child in list(para):
+                        para.remove(child)
+                    para.text = None
+                    
+                    # Track positions of changes for insertion
+                    change_positions = []
+                    
+                    # Apply corrections in reverse order (from end to beginning)
+                    for correction in para_corrections:
+                        original = correction['original']
+                        start_idx = correction['start_idx']
+                        end_idx = correction['end_idx']
+                        change_id = correction['change_id']
+                        
+                        # Record the position and change ID
+                        change_positions.append({
+                            'start': start_idx,
+                            'end': end_idx,
+                            'id': change_id,
+                            'corrected': correction['corrected']
+                        })
+                    
+                    # Sort by start position (regular order for reconstruction)
+                    change_positions.sort(key=lambda x: x['start'])
+                    
+                    # Rebuild the paragraph with changes
+                    last_pos = 0
+                    for change in change_positions:
+                        # Add text before the change
+                        if change['start'] > last_pos:
+                            before_text = para_text[last_pos:change['start']]
+                            if last_pos == 0:
+                                para.text = before_text
+                            else:
+                                span = ET.SubElement(para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                                span.text = before_text
+                        
+                        # Add the change reference
+                        change_element = ET.SubElement(para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}change')
+                        change_element.set('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}change-id', change['id'])
+                        
+                        # Add the corrected text
+                        span = ET.SubElement(para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                        span.text = change['corrected']
+                        
+                        # Update position
+                        last_pos = change['end']
+                    
+                    # Add any remaining text after the last change
+                    if last_pos < len(para_text):
+                        span = ET.SubElement(para, '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}span')
+                        span.text = para_text[last_pos:]
+                    
+                    print(f"Applied {len(para_corrections)} changes to paragraph {para_id}")
+                
+                # Write back the modified content.xml
+                tree.write(content_file, encoding='UTF-8', xml_declaration=True)
+            
+            # Create the new ODT file
+            with zipfile.ZipFile(output_path, 'w') as zipf:
+                for root_dir, _, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root_dir, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+            
+            print(f"Successfully saved ODT with tracked changes to {output_path}")
+            return output_path
+            
+        except Exception as e:
+            print(f"Error applying corrections to ODT: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback to text file
+            output_txt = os.path.splitext(output_path)[0] + ".txt"
+            with open(output_txt, 'w', encoding='utf-8') as f:
+                f.write("CORRECTION SUGGESTIONS:\n\n")
+                for i, correction in enumerate(corrections, 1):
+                    original = correction.get('original', 'N/A')
+                    corrected = correction.get('corrected', 'N/A')
+                    explanation = correction.get('explanation', 'No explanation provided')
+                    f.write(f"{i}. ORIGINAL: {original}\n")
+                    f.write(f"   CORRECTED: {corrected}\n")
+                    f.write(f"   EXPLANATION: {explanation}\n\n")
+            
+            print(f"Saved corrections to text file: {output_txt}")
+            return output_txt
 
 def apply_corrections_to_document(original_doc, corrections, is_docx=True):
     """Apply corrections to a document as tracked changes suggestions.

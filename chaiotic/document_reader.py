@@ -25,16 +25,30 @@ except ImportError:
     ODF_AVAILABLE = False
 
 def read_document(file_path):
-    """Read document content from supported file types (DOCX, ODT)."""
+    """Read a document file and return its content as text.
+    
+    Args:
+        file_path: Path to the document file
+        
+    Returns:
+        Tuple of (content, document_object, is_docx)
+    """
+    # Check file extension
     file_ext = os.path.splitext(file_path)[1].lower()
     
+    # Handle different file types
     if file_ext == '.docx':
         return read_docx(file_path)
     elif file_ext == '.odt':
-        return read_odt(file_path)
+        # Make sure to return a tuple with all the expected values
+        content, doc_obj = read_odt(file_path)
+        return content, doc_obj, False
+    elif file_ext in ['.txt', '.md', '.rtf']:
+        content = read_text_file(file_path)
+        return content, None, False
     else:
-        print(f"Unsupported file format: {file_ext}")
-        return None, None, None
+        print(f"Unsupported file type: {file_ext}")
+        return None, None, False
 
 def read_docx(file_path):
     """Read content from a DOCX file and return structured representation."""
@@ -102,8 +116,87 @@ def read_docx_as_zip(file_path):
     # ...existing code...
 
 def read_odt(file_path):
-    """Read an ODT document."""
-    # ...existing code...
+    """Read an ODT file and return its content as text.
+    
+    Args:
+        file_path: Path to the ODT file
+        
+    Returns:
+        Tuple of (content, odt_document_object)
+    """
+    # Try using odfpy if available
+    try:
+        from odf import text, teletype
+        from odf.opendocument import load
+        
+        # Load the ODT file
+        print(f"Reading ODT file: {file_path}")
+        doc = load(file_path)
+        
+        # Extract all paragraphs and headings
+        paragraphs = []
+        
+        # Extract headings (they are under text:h)
+        headings = doc.getElementsByType(text.H)
+        for heading in headings:
+            paragraphs.append(teletype.extractText(heading))
+        
+        # Extract paragraphs (they are under text:p)
+        paras = doc.getElementsByType(text.P)
+        for para in paras:
+            paragraphs.append(teletype.extractText(para))
+        
+        # Join paragraphs with newlines
+        content = '\n\n'.join(paragraphs)
+        
+        print(f"Successfully read ODT content ({len(content)} characters)")
+        return content, doc
+        
+    except ImportError:
+        print("odfpy library not found, using alternative extraction method")
+        
+        # Alternative method: Extract content.xml from ODT (it's a ZIP file) and parse
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            
+            # Register namespaces for ElementTree
+            namespaces = {
+                'office': 'urn:oasis:names:tc:opendocument:xmlns:office:1.0',
+                'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
+            }
+            
+            # Extract text content from content.xml in the ODT file
+            with zipfile.ZipFile(file_path, 'r') as odt_file:
+                content_xml = odt_file.read('content.xml')
+                
+                # Parse XML
+                root = ET.fromstring(content_xml)
+                
+                # Extract paragraphs and headings
+                paragraphs = []
+                
+                # Find all paragraph and heading elements
+                text_elements = root.findall('.//text:p', namespaces) + root.findall('.//text:h', namespaces)
+                
+                # Extract text from each element
+                for element in text_elements:
+                    # Get all text content
+                    text = ''.join(element.itertext())
+                    if text.strip():  # Only add non-empty paragraphs
+                        paragraphs.append(text)
+                
+                # Join paragraphs with newlines
+                content = '\n\n'.join(paragraphs)
+                
+                print(f"Successfully extracted content from ODT ({len(content)} characters)")
+                return content, odt_file
+                
+        except Exception as e:
+            print(f"Error reading ODT file: {e}")
+            import traceback
+            traceback.print_exc()
+            return "Error reading ODT file.", None
 
 def read_odt_xml(file_path):
     """Read an ODT document by parsing its XML directly."""

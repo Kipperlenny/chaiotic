@@ -10,6 +10,7 @@ import shutil
 from typing import List, Dict, Any, Optional, Union
 
 from .config import DISABLE_CACHE, GPT4O_MINI_MODEL
+from .ai_interface import check_grammar_with_ai
 
 # Initialize OpenAI client only if API key is available
 client = None
@@ -25,45 +26,208 @@ try:
 except ImportError:
     print("Warning: OpenAI package not installed. Using mock data for grammar checking.")
 
-def check_grammar(content, structured_content=None, use_structured=False, model=None, force_refresh=False, use_mock_data=False, cache_key=None, checkpoint_handler=None):
-    """
-    Check grammar and spelling in the content.
+def check_grammar(text, structured_content=None, use_structured=False, checkpoint_handler=None):
+    """Check grammar and suggest corrections.
     
     Args:
-        content: The text content to check
-        structured_content: Optional structured content for paragraph-by-paragraph processing
-        use_structured: Whether to use structured processing
-        model: Optional model to use
-        force_refresh: Whether to force refresh cached results
-        use_mock_data: Whether to use mock data
-        cache_key: Optional cache key
-        checkpoint_handler: Optional checkpoint handler for managing checkpoints
+        text: Text content to check
+        structured_content: Optional structured content (paragraphs with IDs)
+        use_structured: Whether to use structured approach
+        checkpoint_handler: Optional checkpoint handler for saving state
         
     Returns:
-        List of corrections
+        List of suggested corrections
     """
-    from chaiotic.config import load_config
-    config = load_config()
+    # Ensure text is not None and has content
+    if not text or not isinstance(text, str) or len(text.strip()) == 0:
+        print("Error: Empty or invalid text provided to check_grammar")
+        return []
+        
+    print(f"Checking grammar for text ({len(text)} characters)")
     
-    # Check if we have mock data for testing
-    mock_enabled = use_mock_data
-    if not mock_enabled:
-        try:
-            mock_enabled = config.get('use_mock_data', False)
-        except AttributeError:
-            # Handle the case where Config object doesn't have get method
-            mock_enabled = hasattr(config, 'use_mock_data') and config.use_mock_data
+    # Check if API key is configured
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("API key not found. Please set the OPENAI_API_KEY environment variable.")
+        return []
     
-    if mock_enabled:
-        print("Using mock data for grammar checking")
-        return get_mock_corrections()
+    # Try to restore from checkpoint
+    if checkpoint_handler:
+        checkpoint_data = checkpoint_handler.load_checkpoint()
+        if checkpoint_data and 'corrections' in checkpoint_data:
+            print(f"Resumed from checkpoint with {len(checkpoint_data['corrections'])} corrections")
+            return checkpoint_data['corrections']
     
+    # Determine which approach to use
     if use_structured and structured_content:
-        print("Using structured content for grammar checking")
-        return check_grammar_structured(structured_content, checkpoint_handler)
+        print("Using structured approach for grammar checking")
+        corrections = check_grammar_structured(text, structured_content, checkpoint_handler)
     else:
-        print("Using full text for grammar checking")
-        return check_grammar_full_text(content)
+        print("Using standard approach for grammar checking")
+        corrections = check_grammar_standard(text, checkpoint_handler)
+    
+    # Debug output
+    print(f"Grammar check completed with {len(corrections) if corrections else 0} corrections")
+    
+    # Add file type info
+    if corrections and isinstance(corrections, list):
+        for correction in corrections:
+            if isinstance(correction, dict) and 'metadata' not in correction:
+                correction['metadata'] = {'file_type': 'odt'}
+
+    return corrections
+
+def check_grammar_standard(text, checkpoint_handler=None):
+    """Standard approach for grammar checking - process all text in one go."""
+    from .prompts import get_grammar_prompt
+    
+    try:
+        # Use smaller chunks if text is large
+        if len(text) > 10000:
+            print(f"Text is {len(text)} characters, processing in chunks")
+            chunks = split_into_chunks(text, 5000)
+            all_corrections = []
+            
+            for i, chunk in enumerate(chunks):
+                print(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} characters)")
+                prompt = get_grammar_prompt(chunk)
+                response = call_openai_api(prompt)
+                
+                # Parse the response
+                chunk_corrections = parse_corrections(response, chunk)
+                if chunk_corrections:
+                    all_corrections.extend(chunk_corrections)
+                    
+                    # Save checkpoint after each chunk
+                    if checkpoint_handler:
+                        checkpoint_handler.save_checkpoint(
+                            total_elements=len(chunks), 
+                            processed_elements=i+1, 
+                            corrections=all_corrections
+                        )
+                
+            # Force one more check if we didn't get any corrections
+            if not all_corrections:
+                print("No corrections found in chunks, trying again with full text...")
+                prompt = get_grammar_prompt(text, True)
+                response = call_openai_api(prompt, temperature=0.2)
+                all_corrections = parse_corrections(response, text)
+            
+            return all_corrections
+        else:
+            # Process text in one go for smaller documents
+            print("Processing full text as single chunk")
+            prompt = get_grammar_prompt(text)
+            response = call_openai_api(prompt)
+            
+            corrections = parse_corrections(response, text)
+            
+            # Try again with different settings if we didn't get any corrections
+            if not corrections:
+                print("No corrections found, trying with different prompt...")
+                prompt = get_grammar_prompt(text, force_corrections=True)
+                response = call_openai_api(prompt, temperature=0.2)
+                corrections = parse_corrections(response, text)
+            
+            # Save checkpoint
+            if checkpoint_handler and corrections:
+                checkpoint_handler.save_checkpoint(
+                    total_elements=1, 
+                    processed_elements=1, 
+                    corrections=corrections
+                )
+                
+            return corrections
+    except Exception as e:
+        print(f"Error in check_grammar_standard: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def call_openai_api(prompt, model=GPT4O_MINI_MODEL, temperature=0, retries=3, delay=5):
+    """Call the OpenAI API with caching."""
+    from time import sleep
+    
+    # Create a hash based on the prompt content and model
+    request_hash = hashlib.md5((prompt + model).encode('utf-8')).hexdigest()
+    
+    # Ensure api_requests directory exists
+    request_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'api_requests')
+    os.makedirs(request_dir, exist_ok=True)
+    request_filename = os.path.join(request_dir, f"{request_hash}.json")
+    
+    # Check if we already have a cached response
+    if not DISABLE_CACHE and os.path.exists(request_filename):
+        try:
+            with open(request_filename, 'r', encoding='utf-8') as f:
+                response = json.load(f)
+            print(f"Using cached response for request hash '{request_hash}'")
+            return response
+        except Exception as e:
+            print(f"Error reading cached response: {e}")
+    
+    # Make API call if no cache or cache reading failed
+    for attempt in range(retries):
+        try:
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            # Define appropriate max_tokens
+            max_tokens = 4096
+            
+            completion = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=1,
+                frequency_penalty=0,
+                presence_penalty=0
+            )
+            response = completion.choices[0].message.content
+            
+            # Cache the response
+            if not DISABLE_CACHE:
+                try:
+                    with open(request_filename, 'w', encoding='utf-8') as f:
+                        json.dump(response, f, indent=4, ensure_ascii=False)
+                    print(f"Response for request hash '{request_hash}' cached successfully.")
+                except Exception as cache_err:
+                    print(f"Warning: Failed to cache response: {cache_err}")
+                
+            return response
+        except Exception as e:
+            print(f"Error calling OpenAI API (attempt {attempt + 1}/{retries}): {e}")
+            if attempt < retries - 1:
+                sleep(delay)
+            else:
+                # Use the ai_interface module as fallback
+                print("Using ai_interface as fallback for OpenAI API call")
+                return fallback_grammar_check(prompt)
+
+def fallback_grammar_check(prompt):
+    """Use the existing ai_interface module as a fallback for grammar checking."""
+    # Extract the actual content to check from the prompt
+    content_match = re.search(r'Bitte analysiere den folgenden Text:\s*\n\n(.*)', prompt, re.DOTALL)
+    if content_match:
+        content = content_match.group(1)
+    else:
+        content = prompt
+    
+    # Use the existing AI interface
+    corrections = check_grammar_with_ai(content)
+    
+    # Format the response to match what's expected by parse_corrections
+    response = {
+        "corrections": corrections,
+        "corrected_full_text": content  # This will be updated later
+    }
+    
+    # Convert to JSON string
+    return json.dumps(response, ensure_ascii=False, indent=2)
 
 def display_corrections(corrections):
     """Display corrections in a readable format."""
@@ -345,69 +509,6 @@ def process_structured_grammar_check(structured_content):
         "corrections": all_corrections,
         "corrected_full_text": '\n' .join(corrected_full_text)
     }
-
-def call_openai_api(messages, model=GPT4O_MINI_MODEL, retries=3, delay=5):
-    """Call the OpenAI API with caching."""
-    from time import sleep
-    
-    # Create a hash based on the full message content and model
-    # This ensures we properly cache based on the document content
-    message_content = json.dumps(messages, sort_keys=True, ensure_ascii=False)
-    request_hash = hashlib.md5((message_content + model).encode('utf-8')).hexdigest()
-    
-    # Ensure api_requests directory exists
-    request_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'api_requests')
-    os.makedirs(request_dir, exist_ok=True)
-    request_filename = os.path.join(request_dir, f"{request_hash}.json")
-    
-    # Check if we already have a cached response
-    if not DISABLE_CACHE and os.path.exists(request_filename):
-        try:
-            with open(request_filename, 'r', encoding='utf-8') as f:
-                response = json.load(f)
-            print(f"Using cached response for request hash '{request_hash}'")
-            return response
-        except Exception as e:
-            print(f"Error reading cached response: {e}")
-            # Continue to make a new API call if cache read fails
-    
-    # Define appropriate max_tokens based on model
-    if model == GPT4O_MINI_MODEL:
-        max_tokens = 4096  # Reasonable limit for paragraph-by-paragraph checks
-    else:
-        max_tokens = 4096  # Default for other models
-    
-    # Make API call if no cache or cache reading failed
-    for attempt in range(retries):
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=False,
-                temperature=0,
-                max_tokens=max_tokens,
-                top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0
-            )
-            response = completion.choices[0].message.content
-            
-            # Cache the response
-            if not DISABLE_CACHE:
-                try:
-                    with open(request_filename, 'w', encoding='utf-8') as f:
-                        json.dump(response, f, indent=4, ensure_ascii=False)
-                    print(f"Response for request hash '{request_hash}' cached successfully.")
-                except Exception as cache_err:
-                    print(f"Warning: Failed to cache response: {cache_err}")
-                
-            return response
-        except Exception as e:
-            print(f"Error calling OpenAI API (attempt {attempt + 1}/{retries}): {e}")
-            if attempt < retries - 1:
-                sleep(delay)
-            else:
-                raise
 
 def parse_json_response(response):
     """Parse JSON response from OpenAI API with error handling."""
@@ -701,56 +802,74 @@ class CheckpointHandler:
         # Sort by timestamp (newest first)
         self.checkpoints.sort(key=lambda x: x[1], reverse=True)
     
-    def save_checkpoint(self, total_elements, processed_elements, corrections):
+    def load_checkpoint(self):
+        """
+        Load the latest checkpoint.
+        
+        Returns:
+            Dictionary containing checkpoint data or None if no checkpoint exists
+        """
+        return self.get_latest_checkpoint()
+        
+    def save_checkpoint(self, corrections=None, total_elements=None, processed_elements=None):
         """
         Save a checkpoint with current progress.
         
         Args:
+            corrections: Corrections found so far
             total_elements: Total number of elements to process
             processed_elements: Number of elements processed so far
-            corrections: Corrections found so far
         """
+        # Handle different parameter formats for backward compatibility
+        if corrections is None:
+            corrections = []
+            
         # Only save checkpoint every 10% or at least 5 elements processed
-        checkpoint_interval = max(1, int(total_elements * 0.1))
-        if processed_elements == 0 or processed_elements == total_elements or processed_elements % checkpoint_interval == 0:
-            timestamp = int(time.time())
-            filename = f"checkpoint_{timestamp}.json"
-            filepath = os.path.join(self.base_dir, filename)
-            
-            # Prepare data
-            corrections_map = {}
-            for correction in corrections:
-                if 'id' in correction:
-                    para_id = correction['id']
-                    corrections_map[para_id] = {
-                        'original': correction.get('original', ''),
-                        'corrected': correction.get('corrected', ''),
-                        'has_corrections': True,
-                        'explanation': correction.get('explanation', '')
-                    }
-            
-            # Create checkpoint data
-            checkpoint_data = {
-                'progress': {
-                    'processed_elements': processed_elements,
-                    'total_elements': total_elements,
-                    'timestamp': timestamp
-                },
-                'corrections_so_far': corrections,
-                'corrections_map': corrections_map
-            }
-            
-            # Write checkpoint file
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(checkpoint_data, f, ensure_ascii=False, indent=4)
-            
-            # Add to checkpoints list
-            self.checkpoints.append((filepath, timestamp))
-            
-            # Maintain max checkpoints
-            self._clean_old_checkpoints()
-            
-            print(f"Saved checkpoint: {filename} ({processed_elements}/{total_elements} elements)")
+        if total_elements and processed_elements:
+            checkpoint_interval = max(1, int(total_elements * 0.1))
+            if processed_elements == 0 or processed_elements == total_elements or processed_elements % checkpoint_interval == 0:
+                pass  # Continue with saving
+            else:
+                return  # Skip this checkpoint
+        
+        timestamp = int(time.time())
+        filename = f"checkpoint_{timestamp}.json"
+        filepath = os.path.join(self.base_dir, filename)
+        
+        # Prepare data
+        corrections_map = {}
+        for correction in corrections:
+            if isinstance(correction, dict) and 'id' in correction:
+                para_id = correction['id']
+                corrections_map[para_id] = {
+                    'original': correction.get('original', ''),
+                    'corrected': correction.get('corrected', ''),
+                    'has_corrections': True,
+                    'explanation': correction.get('explanation', '')
+                }
+        
+        # Create checkpoint data
+        checkpoint_data = {
+            'progress': {
+                'processed_elements': processed_elements if processed_elements is not None else 0,
+                'total_elements': total_elements if total_elements is not None else 0,
+                'timestamp': timestamp
+            },
+            'corrections': corrections,
+            'corrections_map': corrections_map
+        }
+        
+        # Write checkpoint file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(checkpoint_data, f, ensure_ascii=False, indent=4)
+        
+        # Add to checkpoints list
+        self.checkpoints.append((filepath, timestamp))
+        
+        # Maintain max checkpoints
+        self._clean_old_checkpoints()
+        
+        print(f"Saved checkpoint: {filename} ({checkpoint_data['progress']['processed_elements']}/{checkpoint_data['progress']['total_elements']} elements)")
     
     def _clean_old_checkpoints(self):
         """Remove old checkpoints if we have too many."""
@@ -815,3 +934,163 @@ class CheckpointHandler:
                 pass
         
         self.checkpoints = []
+
+def parse_corrections(response, original_text):
+    """Parse corrections from API response.
+    
+    Args:
+        response: JSON response from OpenAI API
+        original_text: Original text that was checked
+        
+    Returns:
+        List of corrections
+    """
+    try:
+        # Try to parse the response as JSON
+        if isinstance(response, str):
+            try:
+                parsed_response = json.loads(response)
+            except json.JSONDecodeError:
+                # If the response isn't valid JSON, try to extract JSON from it
+                # Look for JSON-like structure in the response
+                match = re.search(r'\{.*\}', response, re.DOTALL)
+                if match:
+                    try:
+                        json_str = match.group(0)
+                        parsed_response = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        print(f"Could not parse response as JSON: {response[:200]}...")
+                        return []
+                else:
+                    print(f"No JSON structure found in response: {response[:200]}...")
+                    return []
+        else:
+            # Response is already parsed
+            parsed_response = response
+        
+        # Handle different response formats
+        corrections = []
+        corrected_full_text = None
+        
+        if isinstance(parsed_response, dict):
+            # Extract corrections from the response
+            if 'corrections' in parsed_response:
+                corrections = parsed_response['corrections']
+            elif 'changes' in parsed_response:
+                # Convert from language_processor format
+                corrections = []
+                for change in parsed_response['changes']:
+                    if 'original' in change and 'corrected' in change:
+                        correction = {
+                            'original': change['original'],
+                            'corrected': change['corrected'],
+                            'explanation': change.get('explanation', '')
+                        }
+                        corrections.append(correction)
+            else:
+                # No corrections found
+                print("No corrections field found in response")
+                return []
+                
+            # Save the corrected full text if available
+            if 'corrected_full_text' in parsed_response:
+                corrected_full_text = parsed_response['corrected_full_text']
+                
+        elif isinstance(parsed_response, list):
+            # Response is already a list of corrections
+            corrections = parsed_response
+        else:
+            # Unknown response format
+            print(f"Unknown response format: {type(parsed_response)}")
+            return []
+        
+        # Validate corrections
+        valid_corrections = []
+        for correction in corrections:
+            if not isinstance(correction, dict):
+                print(f"Invalid correction (not a dict): {correction}")
+                continue
+                
+            if 'original' not in correction or 'corrected' not in correction:
+                print(f"Correction missing required fields: {correction}")
+                continue
+                
+            # Ensure the original text exists in the document
+            original = correction['original']
+            if original in original_text:
+                valid_corrections.append(correction)
+            else:
+                # Try fuzzy matching if exact match fails
+                print(f"Original text not found in document: '{original}'")
+                
+                # Add fuzzy matching here if needed
+        
+        # If we have valid corrections but no corrected_full_text, ensure we create it
+        if valid_corrections and not corrected_full_text:
+            try:
+                # Try to import from utils.text_utils
+                from utils.text_utils import generate_full_text_from_corrections
+                corrected_full_text = generate_full_text_from_corrections(valid_corrections)
+            except ImportError:
+                # Fallback to a simple replacement approach
+                corrected_full_text = original_text
+                for correction in valid_corrections:
+                    corrected_full_text = corrected_full_text.replace(
+                        correction['original'], correction['corrected']
+                    )
+        
+        # Return corrections with corrected_full_text
+        if valid_corrections:
+            return {
+                "corrections": valid_corrections,
+                "corrected_full_text": corrected_full_text or original_text
+            }
+        return valid_corrections
+    except Exception as e:
+        print(f"Error parsing corrections: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def split_into_chunks(text, chunk_size):
+    """Split text into chunks of approximately equal size.
+    
+    Args:
+        text: Text to split
+        chunk_size: Approximate size of each chunk in characters
+        
+    Returns:
+        List of text chunks
+    """
+    # If text is smaller than chunk_size, return it as is
+    if len(text) <= chunk_size:
+        return [text]
+    
+    # Split text into paragraphs
+    paragraphs = text.split('\n\n')
+    
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for paragraph in paragraphs:
+        # Skip empty paragraphs
+        if not paragraph.strip():
+            continue
+            
+        paragraph_size = len(paragraph)
+        
+        # If adding this paragraph would exceed chunk_size, start a new chunk
+        if current_size + paragraph_size > chunk_size and current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+            current_chunk = [paragraph]
+            current_size = paragraph_size
+        else:
+            current_chunk.append(paragraph)
+            current_size += paragraph_size
+    
+    # Add the last chunk if it's not empty
+    if current_chunk:
+        chunks.append('\n\n'.join(current_chunk))
+    
+    return chunks

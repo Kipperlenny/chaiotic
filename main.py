@@ -52,9 +52,9 @@ def main():
         if not file_path:
             file_path = input("Enter the path to the document file (DOCX or ODT): ")
 
-        # If nothing is entered, use test.docx
+        # If nothing is entered, use test.odt
         if not file_path:
-            file_path = 'test.docx'
+            file_path = 'test.odt'
             print(f"No file path provided. Using default: {file_path}")
             
             # If default file doesn't exist, create a sample file
