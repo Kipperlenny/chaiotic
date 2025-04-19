@@ -6,7 +6,7 @@ import time
 import os
 import hashlib
 import difflib
-import json
+import shutil
 from typing import List, Dict, Any, Optional, Union
 
 from .config import DISABLE_CACHE, GPT4O_MINI_MODEL
@@ -25,7 +25,7 @@ try:
 except ImportError:
     print("Warning: OpenAI package not installed. Using mock data for grammar checking.")
 
-def check_grammar(content: str, structured_content=None, use_structured=False) -> List[Dict[str, Any]]:
+def check_grammar(content, structured_content=None, use_structured=False, model=None, force_refresh=False, use_mock_data=False, cache_key=None, checkpoint_handler=None):
     """
     Check grammar and spelling in the content.
     
@@ -33,6 +33,11 @@ def check_grammar(content: str, structured_content=None, use_structured=False) -
         content: The text content to check
         structured_content: Optional structured content for paragraph-by-paragraph processing
         use_structured: Whether to use structured processing
+        model: Optional model to use
+        force_refresh: Whether to force refresh cached results
+        use_mock_data: Whether to use mock data
+        cache_key: Optional cache key
+        checkpoint_handler: Optional checkpoint handler for managing checkpoints
         
     Returns:
         List of corrections
@@ -41,20 +46,21 @@ def check_grammar(content: str, structured_content=None, use_structured=False) -
     config = load_config()
     
     # Check if we have mock data for testing
-    use_mock = False
-    try:
-        use_mock = config.get('use_mock_data', False)
-    except AttributeError:
-        # Handle the case where Config object doesn't have get method
-        use_mock = hasattr(config, 'use_mock_data') and config.use_mock_data
+    mock_enabled = use_mock_data
+    if not mock_enabled:
+        try:
+            mock_enabled = config.get('use_mock_data', False)
+        except AttributeError:
+            # Handle the case where Config object doesn't have get method
+            mock_enabled = hasattr(config, 'use_mock_data') and config.use_mock_data
     
-    if use_mock:
+    if mock_enabled:
         print("Using mock data for grammar checking")
         return get_mock_corrections()
     
     if use_structured and structured_content:
         print("Using structured content for grammar checking")
-        return check_grammar_structured(structured_content)
+        return check_grammar_structured(structured_content, checkpoint_handler)
     else:
         print("Using full text for grammar checking")
         return check_grammar_full_text(content)
@@ -515,46 +521,95 @@ def display_corrections_table(corrections):
             print(f"\n{i}. WARNUNG: Ungültiges Korrekturformat: {correction}")
             print("-"*80)
 
-def check_grammar_structured(structured_content) -> List[Dict[str, Any]]:
+def check_grammar_structured(structured_content, checkpoint_handler=None) -> List[Dict[str, Any]]:
     """
     Check grammar and spelling in structured content (paragraph by paragraph).
     
     Args:
         structured_content: The structured content to check
+        checkpoint_handler: Optional checkpoint handler
         
     Returns:
         List of corrections
     """
-    from chaiotic.ai_interface import check_grammar_with_ai
+    if not structured_content or not isinstance(structured_content, (list, dict)):
+        print("No valid structured content to process.")
+        return []
+        
+    print(f"Processing {len(structured_content)} document elements...")
     
     all_corrections = []
-    print(f"Processing {len(structured_content)} paragraphs...")
+    
+    # Create a map to store original and corrected content by ID
+    corrections_map = {}
     
     # Process each paragraph separately
-    for item in structured_content:
-        # Skip empty paragraphs
-        if 'content' not in item or not item['content'].strip():
+    print(f"Processing {len(structured_content)} document elements...")
+    
+    for i, element in enumerate(structured_content):
+        element_id = element.get('id', f'item{i}')
+        content = element.get('content', '').strip()
+        
+        # Skip empty or very short content
+        if not content or len(content) < 3:
+            corrections_map[element_id] = {
+                "original": content,
+                "corrected": content,
+                "has_corrections": False
+            }
             continue
             
-        # Use the paragraph content
-        paragraph_content = item['content']
-        paragraph_id = item.get('id', None)
+        print(f"Checking element {i+1}/{len(structured_content)}: {element['type']} (ID: {element_id})")
         
-        # Check this paragraph
-        print(f"Checking paragraph {paragraph_id}: {paragraph_content[:50]}...")
-        corrections = check_grammar_with_ai(paragraph_content)
+        # Only send non-empty paragraphs to OpenAI
+        result = check_grammar_of_paragraph(content, element['type'])
         
-        # If we got corrections
-        if corrections and isinstance(corrections, list):
-            # Add paragraph ID to each correction
-            for correction in corrections:
-                if isinstance(correction, dict):
-                    correction['id'] = paragraph_id
+        if result and 'corrected' in result:
+            # Store the result
+            corrections_map[element_id] = {
+                "original": content,
+                "corrected": result['corrected'],
+                "has_corrections": result['has_corrections'],
+                "explanation": result.get('explanation', '')
+            }
             
-            # Add to all corrections
-            all_corrections.extend(corrections)
+            # Add to corrections list if there were actual changes
+            if result['has_corrections']:
+                all_corrections.append({
+                    "id": element_id,
+                    "type": element['type'],
+                    "original": content,
+                    "corrected": result['corrected'],
+                    "explanation": result.get('explanation', '')
+                })
+        else:
+            # If API call failed, keep original content
+            corrections_map[element_id] = {
+                "original": content,
+                "corrected": content,
+                "has_corrections": False
+            }
+        
+        # Optional checkpoint saving - only if handler provided
+        if checkpoint_handler:
+            checkpoint_handler.save_checkpoint(total_elements=len(structured_content), 
+                                              processed_elements=i+1, 
+                                              corrections=all_corrections)
     
-    return all_corrections
+    # Rebuild full text with corrections
+    corrected_full_text = []
+    for i, element in enumerate(structured_content):
+        element_id = element.get('id', f'item{i}')
+        if element_id in corrections_map:
+            corrected_full_text.append(corrections_map[element_id]['corrected'])
+        else:
+            # Fallback to original content if not in map
+            corrected_full_text.append(element.get('content', ''))
+    
+    return {
+        "corrections": all_corrections,
+        "corrected_full_text": '\n' .join(corrected_full_text)
+    }
 
 def check_grammar_full_text(content: str) -> List[Dict[str, Any]]:
     """
@@ -605,3 +660,158 @@ def check_grammar_full_text(content: str) -> List[Dict[str, Any]]:
         valid_corrections.append(correction)
     
     return valid_corrections
+
+class CheckpointHandler:
+    """Handles checkpoint saving and cleanup for grammar checking process."""
+    
+    def __init__(self, base_dir='/home/lenny/chaiotic/checkpoints', max_checkpoints=5, keep_last=True):
+        """
+        Initialize the checkpoint handler.
+        
+        Args:
+            base_dir: Directory to store checkpoints
+            max_checkpoints: Maximum number of checkpoints to keep
+            keep_last: Whether to keep the last checkpoint after success
+        """
+        self.base_dir = base_dir
+        self.max_checkpoints = max_checkpoints
+        self.keep_last = keep_last
+        self.checkpoints = []
+        
+        # Create directory if it doesn't exist
+        os.makedirs(base_dir, exist_ok=True)
+        
+        # Load existing checkpoints
+        self._find_existing_checkpoints()
+    
+    def _find_existing_checkpoints(self):
+        """Find existing checkpoint files and store them in memory."""
+        self.checkpoints = []
+        if os.path.exists(self.base_dir):
+            for filename in os.listdir(self.base_dir):
+                if filename.startswith('checkpoint_') and filename.endswith('.json'):
+                    filepath = os.path.join(self.base_dir, filename)
+                    try:
+                        timestamp = int(filename.replace('checkpoint_', '').replace('.json', ''))
+                        self.checkpoints.append((filepath, timestamp))
+                    except (ValueError, TypeError):
+                        # Skip files with invalid format
+                        continue
+                        
+        # Sort by timestamp (newest first)
+        self.checkpoints.sort(key=lambda x: x[1], reverse=True)
+    
+    def save_checkpoint(self, total_elements, processed_elements, corrections):
+        """
+        Save a checkpoint with current progress.
+        
+        Args:
+            total_elements: Total number of elements to process
+            processed_elements: Number of elements processed so far
+            corrections: Corrections found so far
+        """
+        # Only save checkpoint every 10% or at least 5 elements processed
+        checkpoint_interval = max(1, int(total_elements * 0.1))
+        if processed_elements == 0 or processed_elements == total_elements or processed_elements % checkpoint_interval == 0:
+            timestamp = int(time.time())
+            filename = f"checkpoint_{timestamp}.json"
+            filepath = os.path.join(self.base_dir, filename)
+            
+            # Prepare data
+            corrections_map = {}
+            for correction in corrections:
+                if 'id' in correction:
+                    para_id = correction['id']
+                    corrections_map[para_id] = {
+                        'original': correction.get('original', ''),
+                        'corrected': correction.get('corrected', ''),
+                        'has_corrections': True,
+                        'explanation': correction.get('explanation', '')
+                    }
+            
+            # Create checkpoint data
+            checkpoint_data = {
+                'progress': {
+                    'processed_elements': processed_elements,
+                    'total_elements': total_elements,
+                    'timestamp': timestamp
+                },
+                'corrections_so_far': corrections,
+                'corrections_map': corrections_map
+            }
+            
+            # Write checkpoint file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint_data, f, ensure_ascii=False, indent=4)
+            
+            # Add to checkpoints list
+            self.checkpoints.append((filepath, timestamp))
+            
+            # Maintain max checkpoints
+            self._clean_old_checkpoints()
+            
+            print(f"Saved checkpoint: {filename} ({processed_elements}/{total_elements} elements)")
+    
+    def _clean_old_checkpoints(self):
+        """Remove old checkpoints if we have too many."""
+        if len(self.checkpoints) > self.max_checkpoints:
+            # Sort by timestamp (newest first)
+            self.checkpoints.sort(key=lambda x: x[1], reverse=True)
+            
+            # Delete older checkpoints
+            for filepath, _ in self.checkpoints[self.max_checkpoints:]:
+                try:
+                    os.remove(filepath)
+                    print(f"Removed old checkpoint: {os.path.basename(filepath)}")
+                except OSError:
+                    # Failed to delete
+                    pass
+            
+            # Update list
+            self.checkpoints = self.checkpoints[:self.max_checkpoints]
+    
+    def clean_up_on_success(self):
+        """Clean up all checkpoints after successful completion."""
+        if not self.keep_last:
+            # Remove all checkpoints
+            for filepath, _ in self.checkpoints:
+                try:
+                    os.remove(filepath)
+                    print(f"Cleaned up checkpoint: {os.path.basename(filepath)}")
+                except OSError:
+                    pass
+            self.checkpoints = []
+        else:
+            # Keep only the latest checkpoint
+            if len(self.checkpoints) > 0:
+                latest = self.checkpoints[0]
+                for filepath, _ in self.checkpoints[1:]:
+                    try:
+                        os.remove(filepath)
+                        print(f"Removed intermediate checkpoint: {os.path.basename(filepath)}")
+                    except OSError:
+                        pass
+                self.checkpoints = [latest]
+    
+    def get_latest_checkpoint(self):
+        """Get the latest checkpoint if any exists."""
+        if not self.checkpoints:
+            return None
+        
+        filepath, _ = self.checkpoints[0]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+    
+    def purge_all_checkpoints(self):
+        """Purge all checkpoints from the directory."""
+        for filepath, _ in self.checkpoints:
+            try:
+                os.remove(filepath)
+                print(f"Purged checkpoint: {os.path.basename(filepath)}")
+            except OSError:
+                pass
+        
+        self.checkpoints = []
