@@ -1,21 +1,9 @@
 from lxml import etree
-from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
-import io
-from docx.opc.part import PartFactory
-from docx.opc.rel import Relationships
-from docx.shared import RGBColor
-
-def add_comments_to_paragraph(paragraph, sorted_corrections):
-    for correction in sorted_corrections:
-        add_comment(paragraph, correction['run'], correction['text'], correction['author'])
-
-def add_comment(paragraph, run, comment_text, author="Grammatik-Prüfung"):
-    # The document object is needed to manipulate comments
-    doc = paragraph.part.document
-    # Use custom comment creation function that works with python-docx
-    add_comment_directly(doc, paragraph, comment_text, author)
+from docx.oxml import OxmlElement
+import uuid
+from datetime import datetime
 
 def create_comments_part(document):
     """Create a comments part for the document if it doesn't exist."""
@@ -68,133 +56,181 @@ def copy_run_formatting(source_run, target_run):
         if hasattr(source_run.font, 'color') and hasattr(target_run.font.color, 'rgb'):
             target_run.font.color.rgb = source_run.font.color.rgb
 
-def add_comment_to_paragraph(document, paragraph, comment_text, author="Chaiotic", initials="CH"):
-    """Add a comment to a paragraph. This is a simplified version that should work with python-docx."""
-    add_comment_directly(document, paragraph, comment_text, author, initials)
-
-def add_comment_directly(document, paragraph, comment_text, author="Chaiotic", initials="CH"):
-    """Add a comment directly to a paragraph by manipulating the XML."""
-    from datetime import datetime
-    import uuid
-    from docx.oxml import OxmlElement
+# Adding the add_comment_to_document function from document_writer.py here to avoid circular import
+def add_comment_to_document(doc, paragraph, comment_text, author="Grammatik-Prüfung", initials="GP"):
+    """Add a comment to a paragraph in a document.
     
-    # Get the document part
-    part = document.part if hasattr(document, 'part') else document
+    Args:
+        doc: The docx Document object
+        paragraph: The paragraph to add the comment to
+        comment_text: The text of the comment
+        author: The author of the comment
+        initials: The initials of the author
+        
+    Returns:
+        The comment ID
+    """
+    # Get or create comments part
+    comments_part = ensure_comments_part_exists(doc)
     
     # Create a unique comment ID
-    comment_id = str(uuid.uuid4())[:8]
+    comment_id = str(len(comments_part.xpath('//w:comment')) + 1)
     
-    # Create a comment reference in the paragraph
+    # Create a comment element
+    comment = OxmlElement('w:comment')
+    comment.set(qn('w:id'), comment_id)
+    comment.set(qn('w:author'), author)
+    comment.set(qn('w:initials'), initials)
+    comment.set(qn('w:date'), datetime.now().isoformat())
+    
+    # Add the comment text as a paragraph
+    comment_para = OxmlElement('w:p')
+    comment_r = OxmlElement('w:r')
+    comment_text_element = OxmlElement('w:t')
+    comment_text_element.text = comment_text
+    comment_r.append(comment_text_element)
+    comment_para.append(comment_r)
+    comment.append(comment_para)
+    
+    # Add the comment to the comments part
+    comments_element = comments_part.getroot()
+    comments_element.append(comment)
+    
+    # Add a comment reference to the paragraph
     run = paragraph.add_run()
     comment_reference = OxmlElement('w:commentReference')
     comment_reference.set(qn('w:id'), comment_id)
     run._element.append(comment_reference)
     
-    # Add the comment directly to the document without using comments_part
-    # This is a workaround for the lack of comments_part support in python-docx
-    
-    # Create the comment as a paragraph in the document
-    comment_para = paragraph.add_run(f" [{author}: {comment_text}]")
-    comment_para.italic = True
-    comment_para.font.color.rgb = RGBColor(128, 128, 128)  # Gray color
-    
     return comment_id
 
-def _get_new_comment_id(paragraph):
-    # This function is deprecated - use get_next_comment_id instead
-    return get_next_comment_id(paragraph.part.document)
+# Adding the ensure_comments_part_exists function from document_writer.py
+def ensure_comments_part_exists(doc):
+    """Ensure the document has a comments part.
+    
+    Args:
+        doc: The docx Document object
+        
+    Returns:
+        The comments part
+    """
+    # Check if document has a main document part
+    if not hasattr(doc, 'part'):
+        raise ValueError("Document doesn't have a main document part")
+    
+    # Try to get existing comments part
+    try:
+        NS = {
+            'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+            'comments': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments'
+        }
+        for rel in doc.part.rels.values():
+            if rel.reltype == NS['comments']:
+                return rel.target
+    except:
+        pass
+    
+    # Create a new comments part if it doesn't exist
+    try:
+        from docx.parts.comments import CommentsXml
+        comments_content = CommentsXml.new()
+        comments_part = doc.part.package.create_part('/word/comments.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml', comments_content)
+        
+        # Add a relationship to the comments part
+        NS = {
+            'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+            'comments': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments'
+        }
+        rel_id = doc.part.relate_to(comments_part, NS['comments'], is_external=False)
+        
+        # Add comments reference to document settings
+        settings = doc.settings
+        if settings is None:
+            settings = doc.add_settings()
+        
+        # Return the comments part
+        return comments_part
+    except Exception as e:
+        print(f"Error creating comments part: {e}")
+        raise
 
-def _get_or_create_comments_part(part):
-    # This function is deprecated - use create_comments_part instead
-    return create_comments_part(part.document)
-
-def add_tracked_change_with_comment(paragraph, original_text, corrected_text, explanation):
+def add_tracked_change_with_comment(doc, paragraph, original_text, corrected_text, explanation):
     """Add a tracked change and a comment to a paragraph in a DOCX document.
 
     Args:
+        doc: The docx Document object
         paragraph: The paragraph to modify.
         original_text: The original text to replace.
         corrected_text: The corrected text to insert.
         explanation: The explanation for the change, added as a comment.
+        
+    Returns:
+        Boolean indicating success or failure
     """
-    # Find the run containing the original text
-    for i, run in enumerate(paragraph.runs):
-        if original_text in run.text:
-            # Get the paragraph text before modifying
-            original_para_text = paragraph.text
-            
-            # Split the run into parts
-            before, match, after = run.text.partition(original_text)
-            
-            # Clear existing runs from paragraph to rebuild it
-            p_element = paragraph._element
-            for _ in range(len(paragraph.runs)):
-                if len(p_element.r_lst) > 0:
-                    p_element.remove(p_element.r_lst[0])
-            
-            # Add the text before the correction
-            if before:
-                before_run = paragraph.add_run(before)
-            
-            # Add the original text with strikethrough
-            del_run = paragraph.add_run(original_text)
-            del_run.font.strike = True
-            
-            # Add the corrected text in bold with a different color
-            from docx.shared import RGBColor
-            ins_run = paragraph.add_run(corrected_text)
-            ins_run.bold = True
-            ins_run.font.color.rgb = RGBColor(255, 0, 0)  # Red color for insertions
-            
-            # Add the text after the correction
-            if after:
-                after_run = paragraph.add_run(after)
-            
-            # Add the explanation as italic gray text in brackets
-            comment_run = paragraph.add_run(f" [{explanation}]")
-            comment_run.italic = True
-            comment_run.font.color.rgb = RGBColor(128, 128, 128)  # Gray color for comments
-            
-            print(f"Applied change: '{original_text}' → '{corrected_text}' with explanation: {explanation}")
-            print(f"Paragraph before: '{original_para_text}'")
-            print(f"Paragraph after: '{paragraph.text}'")
-            
-            return True
-    
-    # If we reach here, the original text wasn't found
-    print(f"WARNING: Could not find text '{original_text}' in paragraph: '{paragraph.text}'")
-    return False
-
-def add_tracked_change(document, paragraph, original_text, corrected_text):
-    """Add a tracked change to a paragraph by manipulating the XML directly."""
-    from datetime import datetime
-    
-    # Get the paragraph's element
-    p_elem = paragraph._element
-    
-    # Find the run containing the original text
-    found = False
-    for run in paragraph.runs:
-        if original_text in run.text:
-            # Split the run into parts
-            before, match, after = run.text.partition(original_text)
-            
-            # Update the run with just the "before" text
-            run.text = before
-            
-            # Add strikethrough text for original
-            del_run = paragraph.add_run(original_text)
-            del_run.font.strike = True
-            
-            # Add the corrected text in bold
-            ins_run = paragraph.add_run(corrected_text)
-            ins_run.bold = True
-            
-            # Add the "after" text if needed
-            if after:
-                paragraph.add_run(after)
+    try:
+        # Setup tracked changes in document settings if not already set
+        settings = doc.settings
+        if settings is None:
+            settings = doc.add_settings()
+        
+        track_revisions = settings._element.find(qn('w:trackRevisions'))
+        if track_revisions is None:
+            track_revisions = OxmlElement('w:trackRevisions')
+            settings._element.append(track_revisions)
+        
+        # Get the paragraph's XML
+        p_xml = paragraph._element
+        
+        # Find the run containing the original text
+        for run in paragraph.runs:
+            if original_text in run.text:
+                # Split the run into three parts: before, the match, and after
+                before, match, after = run.text.partition(original_text)
                 
-            found = True
-            break
-    
-    return found
+                # Clear the original run's text
+                run.text = before
+                
+                # Add the <w:del> tag for the original text
+                del_run = paragraph.add_run()
+                del_element = OxmlElement('w:del')
+                del_element.set(qn('w:author'), "Correction")
+                del_element.set(qn('w:date'), datetime.now().isoformat())
+                del_element.set(qn('w:id'), str(uuid.uuid4())[:8])
+                del_run._element.append(del_element)
+                
+                del_text = OxmlElement('w:t')
+                if match.startswith(' ') or match.endswith(' '):
+                    del_text.set(qn('xml:space'), 'preserve')
+                del_text.text = match
+                del_element.append(del_text)
+                
+                # Add the <w:ins> tag for the corrected text
+                ins_run = paragraph.add_run()
+                ins_element = OxmlElement('w:ins')
+                ins_element.set(qn('w:author'), "Correction")
+                ins_element.set(qn('w:date'), datetime.now().isoformat())
+                ins_element.set(qn('w:id'), str(uuid.uuid4())[:8])
+                ins_run._element.append(ins_element)
+                
+                ins_text = OxmlElement('w:t')
+                if corrected_text.startswith(' ') or corrected_text.endswith(' '):
+                    ins_text.set(qn('xml:space'), 'preserve')
+                ins_text.text = corrected_text
+                ins_element.append(ins_text)
+                
+                # Add the 'after' part if it exists
+                if after:
+                    after_run = paragraph.add_run(after)
+                    copy_run_formatting(run, after_run)
+                
+                # Add a comment with the explanation
+                add_comment_to_document(doc, paragraph, explanation)
+                
+                return True
+        
+        return False
+    except Exception as e:
+        print(f"Error in add_tracked_change_with_comment: {e}")
+        return False
