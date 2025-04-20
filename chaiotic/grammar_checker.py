@@ -9,8 +9,11 @@ import difflib
 import shutil
 from typing import List, Dict, Any, Optional, Union
 
+from chaiotic.text_utils import split_text_into_chunks
+
 from .config import DISABLE_CACHE, GPT4O_MINI_MODEL
 from .ai_interface import check_grammar_with_ai
+from .prompts import init_openai_client, load_config, DEFAULT_MODEL, process_content_batch, extract_corrections_from_response
 
 # Initialize OpenAI client only if API key is available
 client = None
@@ -649,31 +652,28 @@ def check_grammar_structured(text, structured_content=None, checkpoint_handler=N
         List of corrections
     """
     corrections = []
-    total_chunks = len(structured_content) if structured_content else 1
     
     try:
         if structured_content:
-            for i, item in enumerate(structured_content):
-                if checkpoint_handler:
-                    checkpoint_handler.update_progress(i / total_chunks)
-                    
-                if isinstance(item, dict) and 'content' in item:
-                    chunk_result = _check_text_chunk(item['content'])
-                    
-                    # Extract the actual corrections list from the result dictionary
-                    chunk_corrections = []
-                    if isinstance(chunk_result, dict) and 'corrections' in chunk_result:
-                        chunk_corrections = chunk_result['corrections']
-                    elif isinstance(chunk_result, list):
-                        chunk_corrections = chunk_result
-                        
-                    # Add ID to each correction
-                    if chunk_corrections:
-                        for corr in chunk_corrections:
-                            if isinstance(corr, dict):
-                                corr['id'] = item.get('id', f'p{i+1}')
-                        corrections.extend(chunk_corrections)
+            # Debug output to see what structured content we have
+            print(f"\nProcessing {len(structured_content)} structural elements for grammar checking")
+            
+            # Use the analyze_document_with_openai function which has the debug output
+            from .prompts import get_grammar_system_prompt, get_grammar_user_prompt
+            
+            # Get prompts
+            system_prompt = get_grammar_system_prompt()
+            user_prompt = get_grammar_user_prompt()
+            
+            # Call the analyze function with debugging output
+            corrections = analyze_document_with_openai(
+                structured_content, 
+                checkpoint_handler=checkpoint_handler,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt
+            )
         else:
+            # Fall back to standard approach for non-structured content
             result = _check_text_chunk(text)
             # Extract corrections list from the result dictionary
             if isinstance(result, dict) and 'corrections' in result:
@@ -686,6 +686,8 @@ def check_grammar_structured(text, structured_content=None, checkpoint_handler=N
             
     except Exception as e:
         print(f"Error in grammar checking: {e}")
+        import traceback
+        traceback.print_exc()
         if checkpoint_handler:
             checkpoint_handler.update_progress(1.0)
     
@@ -806,6 +808,14 @@ class CheckpointHandler:
             Dictionary containing checkpoint data or None if no checkpoint exists
         """
         return self.get_latest_checkpoint()
+
+    def checkpoint_exists(self):
+        """Check if there are any checkpoints available.
+        
+        Returns:
+            True if at least one checkpoint exists, False otherwise
+        """
+        return len(self.checkpoints) > 0
         
     def save_checkpoint(self, corrections=None, total_elements=None, processed_elements=None):
         """
@@ -866,6 +876,34 @@ class CheckpointHandler:
         self._clean_old_checkpoints()
         
         print(f"Saved checkpoint: {filename} ({checkpoint_data['progress']['processed_elements']}/{checkpoint_data['progress']['total_elements']} elements)")
+    
+    def save_corrections(self, corrections):
+        """Save a checkpoint with the current corrections.
+        
+        Args:
+            corrections: List of correction dictionaries
+        """
+        # Calculate progress based on number of corrections
+        total_elements = 100  # Default value
+        processed_elements = len(corrections)
+        
+        # Save checkpoint
+        self.save_checkpoint(
+            corrections=corrections,
+            total_elements=total_elements,
+            processed_elements=processed_elements
+        )
+    
+    def load_corrections(self):
+        """Load corrections from the latest checkpoint.
+        
+        Returns:
+            List of correction dictionaries
+        """
+        checkpoint = self.get_latest_checkpoint()
+        if checkpoint and 'corrections' in checkpoint:
+            return checkpoint['corrections']
+        return []
     
     def _clean_old_checkpoints(self):
         """Remove old checkpoints if we have too many."""
@@ -1090,3 +1128,101 @@ def _check_text_chunk(text):
             'corrections': [],
             'corrected_full_text': text
         }
+
+def analyze_document_with_openai(structured_content, checkpoint_handler=None, system_prompt="", user_prompt=""):
+    """Analyze the document with OpenAI API for grammar and spelling corrections.
+    
+    Args:
+        structured_content: Structured content from the document
+        checkpoint_handler: Optional checkpoint handler to resume from previous state
+        system_prompt: Optional system prompt to use
+        user_prompt: Optional user prompt to use
+        
+    Returns:
+        List of correction dictionaries
+    """
+    client = init_openai_client()
+    
+    if not client:
+        return []
+    
+    if not structured_content:
+        print("No content to analyze")
+        return []
+    
+    # Optionally skip content analysis if checkpoint already exists
+    if checkpoint_handler and checkpoint_handler.checkpoint_exists():
+        print("Found checkpoint, resuming from saved state")
+        return checkpoint_handler.load_corrections()
+    
+    corrections = []
+    
+    # Get language model from config
+    config = load_config()
+    model = config.get("ai", {}).get("model", DEFAULT_MODEL)
+    
+    # Define batching parameters
+    max_tokens = 4000  # Max tokens per batch to avoid token limits
+    current_batch = []
+    current_token_count = 0
+    batch_count = 0
+    
+    # Debug information for API requests
+    print("\n===== OPENAI API REQUEST DEBUG =====")
+    print(f"Using model: {model}")
+    print(f"Total content items: {len(structured_content)}")
+    
+    for item in structured_content:
+        # Estimate token count (roughly 4 chars per token)
+        item_content = item.get('content', '')
+        item_tokens = len(item_content) // 4 + 1
+        
+        # Debug info about sending content to API
+        print(f"\nItem ID: {item.get('id')}, Type: {item.get('type')}, Estimated tokens: {item_tokens}")
+        print(f"Content preview: {item_content[:50]}{'...' if len(item_content) > 50 else ''}")
+        
+        # Check if we have XML content to include
+        xml_content = item.get('xml_content', '')
+        if xml_content:
+            xml_preview = xml_content[:100].replace('\n', ' ')
+            print(f"Including XML structure: {xml_preview}{'...' if len(xml_content) > 100 else ''}")
+            # Include token estimate for XML
+            xml_tokens = len(xml_content) // 4 + 1
+            print(f"XML estimated tokens: {xml_tokens}")
+            item_tokens += xml_tokens
+        
+        # If adding this item would exceed the token limit, process the current batch
+        if current_token_count + item_tokens > max_tokens and current_batch:
+            batch_count += 1
+            print(f"\nProcessing batch {batch_count} with {len(current_batch)} items and ~{current_token_count} tokens")
+            batch_corrections = process_content_batch(current_batch, client, model, system_prompt, user_prompt)
+            corrections.extend(batch_corrections)
+            
+            # Save checkpoint after each batch
+            if checkpoint_handler:
+                checkpoint_handler.save_corrections(corrections)
+                print(f"Saved checkpoint after batch {batch_count}")
+            
+            # Reset for next batch
+            current_batch = []
+            current_token_count = 0
+        
+        # Add the item to the current batch
+        current_batch.append(item)
+        current_token_count += item_tokens
+    
+    # Process any remaining items
+    if current_batch:
+        batch_count += 1
+        print(f"\nProcessing final batch {batch_count} with {len(current_batch)} items and ~{current_token_count} tokens")
+        batch_corrections = process_content_batch(current_batch, client, model, system_prompt, user_prompt)
+        corrections.extend(batch_corrections)
+    
+    print("=" * 60)
+    
+    # Save final checkpoint
+    if checkpoint_handler:
+        checkpoint_handler.save_corrections(corrections)
+        print("Saved final checkpoint")
+    
+    return corrections

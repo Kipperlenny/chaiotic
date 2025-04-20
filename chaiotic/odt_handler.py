@@ -691,206 +691,6 @@ def find_text_in_complex_paragraph(paragraph, text_to_find):
         traceback.print_exc()
         return False, None, -1
 
-# Simplified complex element handler to avoid XML parsing errors
-def handle_complex_nested_element(paragraph, original, corrected, 
-                                 del_change_id, ins_change_id, nsmap):
-    """Handle text replacements in complex nested element structures."""
-    import lxml.etree as LET
-    
-    try:
-        print(f"DEBUG: Starting special handler for complex nested text: '{original}'")
-        
-        # Dump the full XML structure for debugging
-        para_str = LET.tostring(paragraph, encoding='unicode', pretty_print=True)
-        print(f"DEBUG: Full paragraph XML structure:\n{para_str}")
-        
-        # Debug all text nodes to see where our text might be split
-        print("DEBUG: Text nodes in paragraph:")
-        for i, elem in enumerate(paragraph.iter()):
-            if elem.text:
-                print(f"  Node {i} ({elem.tag}): text='{elem.text}'")
-            if elem.tail:
-                print(f"  Node {i} ({elem.tag}): tail='{elem.tail}'")
-        
-        # Special case: "TEsten" where T and E are in different elements
-        if original.lower() == "testen" and "TEsten" in ''.join(paragraph.xpath('.//text()')):
-            print(f"DEBUG: Handling special case for TEsten")
-            
-            # More specific debugging for the TEsten case
-            full_text = ''.join(paragraph.xpath('.//text()'))
-            print(f"DEBUG: Full flattened text: '{full_text}'")
-            
-            # Find exact position of TEsten in the flattened text
-            test_pos = full_text.find("TEsten")
-            print(f"DEBUG: 'TEsten' found at position {test_pos} in flattened text")
-            
-            # Get characters before and after for context
-            context_before = full_text[max(0, test_pos-10):test_pos]
-            context_after = full_text[test_pos+6:test_pos+16]
-            print(f"DEBUG: Context: '...{context_before}[TEsten]{context_after}...'")
-            
-            # Try a simple direct XML replacement approach
-            try:
-                # Create a basic tracked changes replacement
-                simple_replacement = (
-                    f'T<text:change-start text:change-id="{del_change_id}"/>' +
-                    f'<text:change-end text:change-id="{del_change_id}"/>' +
-                    f'<text:change-start text:change-id="{ins_change_id}"/>' +
-                    f'<text:change-end text:change-id="{ins_change_id}"/>Esten'
-                )
-                
-                # Find all possible occurrences of T and E in the XML
-                t_positions = []
-                e_positions = []
-                
-                for i, char in enumerate(para_str):
-                    if char == 'T' and i+100 < len(para_str) and 'E' in para_str[i:i+100]:
-                        t_positions.append(i)
-                    if char == 'E' and i-100 >= 0 and 'T' in para_str[i-100:i]:
-                        e_positions.append(i)
-                
-                print(f"DEBUG: Potential T positions in XML: {t_positions}")
-                print(f"DEBUG: Potential E positions in XML: {e_positions}")
-                
-                # Try to find the best T-E pair
-                for t_pos in t_positions:
-                    for e_pos in e_positions:
-                        if t_pos < e_pos and e_pos - t_pos < 100:  # Within reasonable distance
-                            # Check if this looks like our target (T followed by XML then E)
-                            xml_between = para_str[t_pos+1:e_pos]
-                            if "<" in xml_between and ">" in xml_between:
-                                print(f"DEBUG: Found promising T-E pair at positions {t_pos}-{e_pos}")
-                                print(f"DEBUG: XML between: '{xml_between}'")
-                                
-                                # Try direct replacement
-                                try:
-                                    # Create a string with our replacement
-                                    modified_str = para_str[:t_pos] + simple_replacement + para_str[e_pos+1:]
-                                    
-                                    # Try to parse it back
-                                    new_para = LET.fromstring(modified_str)
-                                    
-                                    # If successful, replace the paragraph
-                                    parent = paragraph.getparent()
-                                    if parent is not None:
-                                        idx = list(parent).index(paragraph)
-                                        parent.remove(paragraph)
-                                        parent.insert(idx, new_para)
-                                        print("DEBUG: Successfully replaced paragraph with direct XML approach")
-                                        return True
-                                except Exception as e:
-                                    print(f"DEBUG: Error in direct replacement: {e}")
-                
-                print("DEBUG: Could not find suitable T-E pair for direct replacement")
-            except Exception as e:
-                print(f"DEBUG: Error in T-E direct replacement: {e}")
-            
-            # Continue with existing approach...
-            # ...existing code...
-    
-    except Exception as e:
-        print(f"Error in complex nested element handling: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    return False
-
-def get_normalized_paragraph_text(paragraph):
-    """Get normalized text content from a paragraph, handling whitespace better.
-    
-    Args:
-        paragraph: The paragraph element
-        
-    Returns:
-        Normalized text string
-    """
-    # Get all text nodes
-    text_parts = []
-    
-    def extract_text(elem):
-        if elem.text:
-            text_parts.append(elem.text)
-        
-        for child in elem:
-            extract_text(child)
-            
-            if child.tail:
-                text_parts.append(child.tail)
-    
-    extract_text(paragraph)
-    
-    # Join and normalize whitespace
-    return ''.join(text_parts)
-
-def find_text_across_nested_elements(paragraph, text_to_find):
-    """Find text that might be split across multiple nested elements.
-    
-    Args:
-        paragraph: The paragraph element
-        text_to_find: Text to search for
-        
-    Returns:
-        Tuple of (found, elements, text_offset) or None
-    """
-    import lxml.etree as LET
-    
-    # For cases like "T<span>E</span>sten" when searching for "TEsten"
-    # We need to check if the text might be split across elements
-    
-    # First, let's get all text fragments in order
-    fragments = []
-    
-    def collect_fragments(elem, path=None):
-        if path is None:
-            path = []
-        
-        path = path + [elem]
-        
-        if elem.text:
-            fragments.append((elem.text, path, 'text'))
-        
-        for child in elem:
-            collect_fragments(child, path)
-            
-            if child.tail:
-                fragments.append((child.tail, path, 'tail'))
-    
-    collect_fragments(paragraph)
-    
-    # Now try to reconstruct the text by concatenating consecutive fragments
-    for i in range(len(fragments)):
-        current_text = ""
-        element_paths = []
-        
-        for j in range(i, len(fragments)):
-            current_text += fragments[j][0]
-            element_paths.append(fragments[j])
-            
-            if text_to_find in current_text:
-                # Found a match spanning multiple elements
-                start_pos = current_text.find(text_to_find)
-                
-                # Special handling for nested spans with mixed content
-                if len(element_paths) > 1:
-                    # This is a complex case where the text crosses element boundaries
-                    # We'll need to handle this through a different approach
-                    
-                    # Get the XML string representation
-                    para_str = LET.tostring(paragraph, encoding='unicode')
-                    
-                    # Check if the text really exists in the XML
-                    if text_to_find in para_str.replace('>', '> ').replace('<', ' <'):
-                        print(f"Found '{text_to_find}' across multiple elements")
-                        # In this case, we'll return a special marker to use string replacement
-                        return True, "COMPLEX_NESTED", 0
-                
-                # If we found a match in a single element
-                start_path = element_paths[0][1][-1]  # Last element in path
-                return True, start_path, start_pos
-    
-    return None
-
-# Add additional helper function for complex nested element handling
 def handle_complex_nested_element(paragraph, original, corrected, 
                                  del_change_id, ins_change_id, nsmap):
     """Handle text replacements in complex nested element structures.
@@ -907,79 +707,187 @@ def handle_complex_nested_element(paragraph, original, corrected,
         True if successful, False otherwise
     """
     import lxml.etree as LET
-    import re
     
     try:
-        # Convert the paragraph to string
-        para_str = LET.tostring(paragraph, encoding='unicode')
+        # Debug the paragraph structure
+        para_str = LET.tostring(paragraph, encoding='unicode', pretty_print=True)
+        print(f"DEBUG: Original paragraph XML:\n{para_str}")
         
-        # We need to be careful with XML structure
-        # First, create a pattern that matches the exact text with XML context awareness
-        # This looks complex but it's to ensure we only replace text content, 
-        # not text that appears in XML tags
-        pattern = re.compile(f"(?<=>|[^<>]){re.escape(original)}(?=[^<>]|<)")
+        # Get full flattened text from paragraph
+        full_text = ''.join(paragraph.xpath('.//text()'))
+        print(f"DEBUG: Full flattened text: '{full_text}'")
         
-        if not pattern.search(para_str):
-            print(f"Complex text '{original}' not found using regex pattern")
+        # Verify the original text is in the flattened text
+        if original not in full_text:
+            print(f"DEBUG: Original text '{original}' not found in flattened text")
             return False
         
-        # Generate replacement with change markers
-        replacement = (
-            f'<text:change-start text:change-id="{del_change_id}"/>' +
-            f'<text:change-end text:change-id="{del_change_id}"/>' +
-            f'<text:change-start text:change-id="{ins_change_id}"/>' +
-            f'<text:change-end text:change-id="{ins_change_id}"/>'
-        )
+        print(f"DEBUG: Original text '{original}' found in flattened text at position {full_text.find(original)}")
         
-        # Replace using the pattern
-        modified_str = pattern.sub(replacement, para_str)
+        # Try the direct approach: create a new paragraph with the structure we want
+        new_para = LET.Element(paragraph.tag, paragraph.attrib)
         
-        if modified_str == para_str:
-            print("No changes made in complex element handling")
-            return False
+        # Split the full text at the original text
+        parts = full_text.split(original, 1)
         
-        try:
-            # Parse back into an element
-            new_para = LET.fromstring(modified_str)
+        # Text before our target
+        if parts[0]:
+            before_span = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
+            before_span.text = parts[0]
+        
+        # Container for our tracked changes
+        change_span = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
+        
+        # Add deletion and insertion markers ONLY - don't include the text
+        del_start = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-start')
+        del_start.set('{' + nsmap['text'] + '}change-id', del_change_id)
+        
+        del_end = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-end') 
+        del_end.set('{' + nsmap['text'] + '}change-id', del_change_id)
+        
+        ins_start = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-start')
+        ins_start.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+        
+        ins_end = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-end')
+        ins_end.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+        
+        # Text after our target
+        if len(parts) > 1 and parts[1]:
+            after_span = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
+            after_span.text = parts[1]
+        
+        # Replace the original paragraph
+        parent = paragraph.getparent()
+        if parent is not None:
+            idx = list(parent).index(paragraph)
+            parent.remove(paragraph)
+            parent.insert(idx, new_para)
             
-            # Replace the old paragraph
-            parent = paragraph.getparent()
-            if parent is not None:
-                idx = list(parent).index(paragraph)
-                parent.remove(paragraph)
-                parent.insert(idx, new_para)
-                return True
-        except Exception as e:
-            print(f"Error parsing modified XML: {e}")
-            
-            # Try alternative approach using parent's XML
-            try:
-                parent = paragraph.getparent()
-                if parent is None:
-                    return False
-                    
-                parent_str = LET.tostring(parent, encoding='unicode')
-                para_str = LET.tostring(paragraph, encoding='unicode')
-                
-                # Replace the paragraph within the parent
-                if para_str in parent_str:
-                    modified_parent_str = parent_str.replace(para_str, modified_str)
-                    new_parent = LET.fromstring(modified_parent_str)
-                    
-                    # Replace the parent
-                    grand_parent = parent.getparent()
-                    if grand_parent is not None:
-                        idx = list(grand_parent).index(parent)
-                        grand_parent.remove(parent)
-                        grand_parent.insert(idx, new_parent)
-                        return True
-            except Exception as e2:
-                print(f"Error in alternative parent XML approach: {e2}")
-    
+            print(f"DEBUG: Successfully rebuilt paragraph with tracked changes for '{original}' -> '{corrected}'")
+            print(f"DEBUG: New paragraph XML:\n{LET.tostring(new_para, encoding='unicode', pretty_print=True)}")
+            return True
+        
+        return False
     except Exception as e:
-        print(f"Error in complex element handling: {e}")
+        print(f"Error in complex nested element handler: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Try a fallback approach for special case of first letter capitalization
+        try:
+            if original.lower() == corrected.lower() and original[0].isupper() != corrected[0].isupper():
+                print(f"DEBUG: Attempting special case handling for capitalization change")
+                return handle_capitalization_change(paragraph, original, corrected, del_change_id, ins_change_id, nsmap)
+        except Exception as e2:
+            print(f"Error in capitalization fallback: {e2}")
+        
+        return False
+
+def handle_capitalization_change(paragraph, original, corrected, del_change_id, ins_change_id, nsmap):
+    """Special handler for capitalization changes.
     
-    return False
+    Args:
+        paragraph: The paragraph element
+        original: Original text with capitalization issue
+        corrected: Corrected text
+        del_change_id: Change ID for deletion
+        ins_change_id: Change ID for insertion
+        nsmap: XML namespaces
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    import lxml.etree as LET
+    
+    try:
+        # Get the first span or text node that might contain our first character
+        text_nodes = []
+        
+        # First, check the paragraph text
+        if paragraph.text:
+            text_nodes.append((paragraph, 'text', paragraph.text))
+        
+        # Then check all child elements
+        for elem in paragraph.iter():
+            if elem is not paragraph and elem.text:
+                text_nodes.append((elem, 'text', elem.text))
+            if elem.tail:
+                text_nodes.append((elem, 'tail', elem.tail))
+        
+        # Look for the first character of our original text
+        for node, attr, text in text_nodes:
+            if original[0] in text:
+                # Found it! Now replace just that character
+                char_pos = text.find(original[0])
+                
+                if attr == 'text':
+                    # It's in the element's text
+                    before_text = text[:char_pos]
+                    node.text = before_text
+                    
+                    # Create change markers
+                    change_span = LET.SubElement(node, '{' + nsmap['text'] + '}span')
+                    
+                    del_start = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-start')
+                    del_start.set('{' + nsmap['text'] + '}change-id', del_change_id)
+                    
+                    del_end = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-end')
+                    del_end.set('{' + nsmap['text'] + '}change-id', del_change_id)
+                    
+                    ins_start = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-start')
+                    ins_start.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+                    
+                    ins_end = LET.SubElement(change_span, '{' + nsmap['text'] + '}change-end')
+                    ins_end.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+                    
+                    # Add corrected character
+                    # ins_end.tail = corrected[0]
+                    
+                    # Add remainder span if needed
+                    if len(text) > char_pos + 1:
+                        remainder = LET.SubElement(node, '{' + nsmap['text'] + '}span')
+                        remainder.text = text[char_pos + 1:]
+                    
+                    print(f"DEBUG: Successfully handled capitalization change in element text")
+                    return True
+                elif attr == 'tail':
+                    # It's in the element's tail - more complex
+                    before_text = text[:char_pos]
+                    node.tail = before_text
+                    
+                    # Create a new element after this one
+                    parent = node.getparent()
+                    idx = list(parent).index(node)
+                    
+                    # Create container for changes
+                    container = LET.Element('{' + nsmap['text'] + '}span')
+                    
+                    # Add change markers
+                    del_start = LET.SubElement(container, '{' + nsmap['text'] + '}change-start')
+                    del_start.set('{' + nsmap['text'] + '}change-id', del_change_id)
+                    
+                    del_end = LET.SubElement(container, '{' + nsmap['text'] + '}change-end')
+                    del_end.set('{' + nsmap['text'] + '}change-id', del_change_id)
+                    
+                    ins_start = LET.SubElement(container, '{' + nsmap['text'] + '}change-start')
+                    ins_start.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+                    
+                    ins_end = LET.SubElement(container, '{' + nsmap['text'] + '}change-end')
+                    ins_end.set('{' + nsmap['text'] + '}change-id', ins_change_id)
+                    
+                    # Add corrected character and remainder
+                    # ins_end.tail = corrected[0] + text[char_pos + 1:]
+                    
+                    # Insert after current node
+                    parent.insert(idx + 1, container)
+                    
+                    print(f"DEBUG: Successfully handled capitalization change in element tail")
+                    return True
+        
+        return False
+    except Exception as e:
+        print(f"Error in capitalization handler: {e}")
+        return False
 
 def find_and_mark_text_in_paragraphs(office_text, original, corrected, 
                                 orig_to_track, corr_to_track,
@@ -1002,6 +910,8 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
     print(f"\n=== DEBUG: Marking text: '{original}' -> '{corrected}' ===")
     
     # Find and update text in paragraphs
+    found_and_replaced = False
+    
     for paragraph in office_text.findall('.//{' + nsmap['text'] + '}p'):
         try:
             # Skip paragraphs in tracked changes
@@ -1011,7 +921,7 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
             
             # Get normalized paragraph text for debugging
             full_text = get_normalized_paragraph_text(paragraph)
-            para_preview = full_text[:50] + ('...' if len(full_text) > 50 else '')
+            para_preview = full_text[:100] + ('...' if len(full_text) > 100 else '')
             print(f"Checking paragraph: '{para_preview}'")
             
             # Debug check for text with punctuation
@@ -1021,29 +931,26 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
             
             # Convert paragraph to string for debugging
             para_str = LET.tostring(paragraph, encoding='unicode')
-            print(f"Paragraph XML (preview): '{para_str[:100]}...'")
+            print(f"Paragraph XML (preview): '{para_str[:150]}...'")
+            
+            # Check if the paragraph contains our text
+            if original not in full_text:
+                print(f"DEBUG: '{original}' NOT found in this paragraph")
+                continue
+                
+            print(f"DEBUG: Found '{original}' in paragraph!")
             
             # Use our improved text search function for complex paragraphs
             found, element, position = find_text_in_complex_paragraph(paragraph, original)
             
             if found:
-                print(f"DEBUG: Found '{original}' in paragraph!")
-                
-                # Special case for "TEsten" that might span across elements
-                if original.lower() == "testen" and "TEsten" in full_text:
-                    print("DEBUG: Using specialized TEsten handler")
-                    if handle_testen_special_case(paragraph, del_change_id_str, ins_change_id_str, nsmap):
-                        print("Successfully handled TEsten special case")
-                        continue
-                    else:
-                        print("TEsten special handler failed, trying regular handlers")
-                
                 if element == "COMPLEX_NESTED":
                     print(f"DEBUG: Text spans multiple elements, using complex handler")
                     # Use the specialized handler for complex nested elements
                     if handle_complex_nested_element(paragraph, original, corrected,
                                                   del_change_id_str, ins_change_id_str, nsmap):
                         print(f"Successfully handled complex nested elements for '{original}'")
+                        found_and_replaced = True
                     else:
                         print(f"Failed to handle complex nested elements for '{original}'")
                 else:
@@ -1081,6 +988,8 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
                             {'{' + nsmap['text'] + '}change-id': ins_change_id_str}
                         )
                         
+                        # DON'T add the text content here - it's already in the change element
+                        
                         # Add remainder text
                         if len(parts) > 1 and parts[1]:
                             remainder_span = LET.SubElement(element, '{' + nsmap['text'] + '}span')
@@ -1089,6 +998,7 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
                         # Restore tail
                         element.tail = saved_tail
                         print("DEBUG: Successfully inserted tracked change markers into element.text")
+                        found_and_replaced = True
                             
                     # Handle case when text is in element.tail
                     elif element.tail and original in element.tail:
@@ -1128,6 +1038,8 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
                             {'{' + nsmap['text'] + '}change-id': ins_change_id_str}
                         )
                         
+                        # DON'T add the text content here - it's already in the change element
+                        
                         # Add tail remainder if any
                         if len(parts) > 1 and parts[1]:
                             container.tail = parts[1]
@@ -1135,6 +1047,7 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
                         # Insert our container after the current element
                         parent.insert(idx + 1, container)
                         print("DEBUG: Successfully inserted tracked change markers into element.tail")
+                        found_and_replaced = True
                     
                     # Handle other complex cases
                     else:
@@ -1144,82 +1057,84 @@ def find_and_mark_text_in_paragraphs(office_text, original, corrected,
                         if handle_complex_nested_element(paragraph, original, corrected,
                                                        del_change_id_str, ins_change_id_str, nsmap):
                             print("Successfully used complex handler as fallback")
+                            found_and_replaced = True
                         else:
                             print("Failed to handle with complex handler - text position unclear")
             else:
-                print(f"DEBUG: '{original}' NOT found in this paragraph")
+                print(f"DEBUG: '{original}' NOT found in this paragraph using element search")
+                
+                # Try the complex handler anyway as a last resort if we know the text is in there
+                if original in full_text:
+                    print("DEBUG: Trying complex handler as last resort")
+                    if handle_complex_nested_element(paragraph, original, corrected, 
+                                                  del_change_id_str, ins_change_id_str, nsmap):
+                        print("Successfully used complex handler as last resort")
+                        found_and_replaced = True
         
         except Exception as e:
             print(f"Error processing paragraph: {e}")
             import traceback
             traceback.print_exc()
             continue
-
-def handle_testen_special_case(paragraph, del_change_id, ins_change_id, nsmap):
-    """Specialized handler just for the TEsten -> Testen case where T and E are in different elements."""
-    import lxml.etree as LET
     
+    # If we couldn't find the text in paragraphs using normal methods,
+    # try one more approach for the entire document
+    if not found_and_replaced:
+        print("DEBUG: No successful replacement found, trying document-wide search...")
+        
+        # This is a last resort - try a more aggressive approach to find the text
+        for element in office_text.xpath('//*'):
+            # Skip tracked-changes elements
+            if any(tag in element.tag for tag in ['tracked-changes', 'change-start', 'change-end']):
+                continue
+                
+            try:
+                full_text = ''.join(element.xpath('.//text()'))
+                if original in full_text:
+                    print(f"DEBUG: Found '{original}' in element {element.tag}")
+                    if handle_complex_nested_element(element, original, corrected,
+                                                  del_change_id_str, ins_change_id_str, nsmap):
+                        print("Successfully handled using complex handler on container element")
+                        return
+            except Exception as e:
+                print(f"Error in document-wide search: {e}")
+                continue
+
+def get_normalized_paragraph_text(paragraph):
+    """Get all text from a paragraph with normalized whitespace.
+    
+    Args:
+        paragraph: The paragraph element
+        
+    Returns:
+        The normalized text content of the paragraph
+    """
     try:
-        # Create a completely new simplified paragraph
-        new_para = LET.Element(paragraph.tag, paragraph.attrib)
+        # Use xpath to get all text nodes from the paragraph
+        text_nodes = paragraph.xpath('.//text()')
         
-        # Get all text from the paragraph to split around TEsten
-        full_text = ''.join(paragraph.xpath('.//text()'))
+        # Combine all text nodes
+        full_text = ''.join(text_nodes)
         
-        if "TEsten" not in full_text:
-            return False
-            
-        print(f"DEBUG: Special TEsten handler activated, full text: '{full_text}'")
-        
-        # Split the text at "TEsten"
-        parts = full_text.split("TEsten", 1)
-        
-        # First part up to "T"
-        if parts[0]:
-            before_span = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
-            before_span.text = parts[0]
-        
-        # Add "T" directly WITHOUT a separate span to prevent spacing issues
-        # Instead, add "T" as text in the container, with change markers as children
-        container = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
-        container.text = "T"
-        
-        # Add change markers for "E" to "e" change
-        del_start = LET.SubElement(container, '{' + nsmap['text'] + '}change-start')
-        del_start.set('{' + nsmap['text'] + '}change-id', del_change_id)
-        
-        del_end = LET.SubElement(container, '{' + nsmap['text'] + '}change-end')
-        del_end.set('{' + nsmap['text'] + '}change-id', del_change_id)
-        
-        ins_start = LET.SubElement(container, '{' + nsmap['text'] + '}change-start')
-        ins_start.set('{' + nsmap['text'] + '}change-id', ins_change_id)
-        
-        ins_end = LET.SubElement(container, '{' + nsmap['text'] + '}change-end')
-        ins_end.set('{' + nsmap['text'] + '}change-id', ins_change_id)
-        
-        # Add "esten" directly after the change markers in the SAME span
-        # This prevents whitespace from being inserted
-        if len(parts) > 1:
-            # Set the tail of the last change marker to contain "esten"
-            ins_end.tail = "esten"
-            
-            # Create a separate span for any remaining text
-            if len(parts[1]) > 0:
-                after_span = LET.SubElement(new_para, '{' + nsmap['text'] + '}span')
-                after_span.text = parts[1]
-        
-        # Replace the paragraph
-        parent = paragraph.getparent()
-        if parent is not None:
-            idx = list(parent).index(paragraph)
-            parent.remove(paragraph)
-            parent.insert(idx, new_para)
-            print("DEBUG: Successfully replaced paragraph with improved TEsten structure (no whitespace)")
-            return True
-        
-        return False
+        # Normalize whitespace but maintain structure
+        # This doesn't collapse all whitespace, just redundant spaces
+        return ' '.join(full_text.split())
     except Exception as e:
-        print(f"Error in TEsten special handler: {e}")
+        print(f"Error in get_normalized_paragraph_text: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        
+        # Fallback approach
+        try:
+            # Simple concatenation of all text nodes
+            return ''.join(paragraph.xpath('.//text()'))
+        except:
+            # Last resort: stringify and extract text
+            from lxml import etree
+            try:
+                para_str = etree.tostring(paragraph, encoding='unicode')
+                # Remove all XML tags to get plain text
+                import re
+                return re.sub(r'<[^>]+>', '', para_str)
+            except:
+                return ""

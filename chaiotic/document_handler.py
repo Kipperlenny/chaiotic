@@ -447,6 +447,55 @@ def create_sample_document(file_path):
     else:
         print(f"Cannot create sample document with extension {file_ext}. Please use .docx or .odt.")
 
+def extract_structured_content(file_path):
+    """Extract structured content from a document file.
+    
+    Args:
+        file_path: Path to the document file
+        
+    Returns:
+        List of dictionaries containing structured content
+    """
+    file_ext = os.path.splitext(file_path)[1].lower()
+    
+    # Call the specific extractor function based on file type
+    if file_ext == '.odt':
+        from .document_extractor import extract_structured_odt
+        content = extract_structured_odt(file_path)
+    elif file_ext == '.docx':
+        from .document_extractor import extract_structured_docx
+        content = extract_structured_docx(file_path)
+    elif file_ext == '.txt':
+        from .document_extractor import extract_structured_text
+        content = extract_structured_text(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {file_ext}")
+    
+    # Debug output - show what was extracted
+    print(f"\n===== EXTRACTED DOCUMENT STRUCTURE ({len(content)} elements) =====")
+    for i, item in enumerate(content[:3], 1):  # Print first 3 items for preview
+        print(f"\nItem {i}/{len(content)}: ID={item.get('id')}, Type={item.get('type')}")
+        print(f"Content: {item.get('content')[:100]}{'...' if len(item.get('content', '')) > 100 else ''}")
+        
+        # Check if we have XML content
+        if 'xml_content' in item:
+            xml_preview = item['xml_content'][:150]
+            print(f"XML: {xml_preview}{'...' if len(item['xml_content']) > 150 else ''}")
+        
+        # Check for nested elements
+        if 'metadata' in item and 'nested_elements' in item['metadata']:
+            nested = item['metadata']['nested_elements']
+            print(f"Nested elements: {len(nested)}")
+            if nested:
+                print(f"  First nested: {nested[0].get('type')}, Text: {nested[0].get('text')[:50]}...")
+    
+    if len(content) > 3:
+        print(f"\n... and {len(content) - 3} more items\n")
+    
+    print("=" * 60)
+    
+    return content
+
 # Re-export all the functions to maintain backward compatibility
 __all__ = [
     'read_document',

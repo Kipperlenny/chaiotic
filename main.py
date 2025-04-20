@@ -30,7 +30,7 @@ def main():
     # Get imports
     from chaiotic.document_handler import read_document, save_document, create_sample_document
     from chaiotic.grammar_checker import check_grammar, display_corrections, CheckpointHandler
-    from chaiotic.utils import preprocess_content
+    from chaiotic.text_utils import preprocess_content
     from chaiotic.config import load_config
     
     # Load configuration

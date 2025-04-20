@@ -23,11 +23,36 @@ def extract_structured_content(file_path):
     file_ext = os.path.splitext(file_path)[1].lower()
     
     if file_ext == '.odt':
-        return extract_structured_odt(file_path)
+        content = extract_structured_odt(file_path)
     elif file_ext == '.txt':
-        return extract_structured_text(file_path)
+        content = extract_structured_text(file_path)
     else:
         raise ValueError(f"Unsupported file type: {file_ext}")
+    
+    # Debug output
+    print(f"\n===== EXTRACTED DOCUMENT STRUCTURE ({len(content)} elements) =====")
+    for i, item in enumerate(content[:3], 1):  # Print first 3 items for preview
+        print(f"\nItem {i}/{len(content)}: ID={item.get('id')}, Type={item.get('type')}")
+        print(f"Content: {item.get('content')[:100]}{'...' if len(item.get('content', '')) > 100 else ''}")
+        
+        # Check if we have XML content
+        if 'xml_content' in item:
+            xml_preview = item['xml_content'][:150]
+            print(f"XML: {xml_preview}{'...' if len(item['xml_content']) > 150 else ''}")
+        
+        # Check for nested elements
+        if 'metadata' in item and 'nested_elements' in item['metadata']:
+            nested = item['metadata']['nested_elements']
+            print(f"Nested elements: {len(nested)}")
+            if nested:
+                print(f"  First nested: {nested[0].get('type')}, Text: {nested[0].get('text')[:50]}...")
+    
+    if len(content) > 3:
+        print(f"\n... and {len(content) - 3} more items\n")
+    
+    print("=" * 60)
+    
+    return content
 
 def extract_structured_odt(file_path):
     """Extract structured content from an ODT file."""
@@ -39,6 +64,7 @@ def extract_structured_odt(file_path):
         from odf.opendocument import load
         from odf.text import P, H, Span
         from odf.table import Table, TableRow, TableCell
+        import odf.teletype as teletype
         
         doc = load(file_path)
         structured_content = []
@@ -78,15 +104,61 @@ def extract_structured_odt(file_path):
                 
             return ''.join(parts)
         
+        def get_element_xml(element):
+            """Get the XML representation of the element."""
+            try:
+                # Try to directly get the XML
+                return element.toXml()
+            except Exception as e:
+                print(f"Warning: Could not get XML directly: {e}")
+                # Fallback approach if direct conversion fails
+                try:
+                    import lxml.etree as LET
+                    from io import StringIO
+                    
+                    # Create a simplified XML representation
+                    output = StringIO()
+                    output.write(f"<{element.tagName}")
+                    
+                    # Add attributes if any
+                    if hasattr(element, 'attributes') and element.attributes:
+                        for attr_name, attr_value in element.attributes.items():
+                            output.write(f' {attr_name}="{attr_value}"')
+                    
+                    output.write(">")
+                    
+                    # Add content if any
+                    if hasattr(element, 'childNodes') and element.childNodes:
+                        for child in element.childNodes:
+                            if hasattr(child, 'toXml'):
+                                output.write(child.toXml())
+                            elif hasattr(child, 'data'):
+                                output.write(child.data)
+                    
+                    output.write(f"</{element.tagName}>")
+                    return output.getvalue()
+                except Exception as e2:
+                    print(f"Warning: Could not create XML representation: {e2}")
+                    return f"<{element.tagName}>{get_text_content(element)}</{element.tagName}>"
+        
         # Process paragraphs and headings with better tracking of nested elements
         idx = 0
         for element in doc.text.childNodes:
             try:
                 if isinstance(element, (P, H)):
                     text = get_text_content(element)
+                    xml_content = get_element_xml(element)
+                    
+                    # Get element style if available
+                    style_name = None
+                    if hasattr(element, 'attributes') and element.attributes:
+                        style_name = element.attributes.get('text:style-name')
+                    
                     element_info = {
                         'type': 'heading' if isinstance(element, H) else 'paragraph',
                         'text': text,
+                        'xml': xml_content,
+                        'style': style_name,
                         'nested': []
                     }
                     
@@ -95,10 +167,12 @@ def extract_structured_odt(file_path):
                         for child in element.childNodes:
                             if isinstance(child, Span):
                                 span_text = get_text_content(child)
+                                span_xml = get_element_xml(child)
                                 if span_text.strip():
                                     element_info['nested'].append({
                                         'type': 'span',
-                                        'text': span_text
+                                        'text': span_text,
+                                        'xml': span_xml
                                     })
                     
                     if text.strip():
@@ -107,18 +181,24 @@ def extract_structured_odt(file_path):
                             'id': f'p{idx}',
                             'type': element_info['type'],
                             'content': text,
-                            'metadata': {'nested_elements': element_info['nested']}
+                            'xml_content': xml_content,
+                            'metadata': {
+                                'nested_elements': element_info['nested'],
+                                'style_name': style_name
+                            }
                         })
                 elif isinstance(element, Table):
                     for r_idx, row in enumerate(element.getElementsByType(TableRow)):
                         for c_idx, cell in enumerate(row.getElementsByType(TableCell)):
                             text = get_text_content(cell)
+                            xml_content = get_element_xml(cell)
                             if text.strip():
                                 idx += 1
                                 structured_content.append({
                                     'id': f't{len(structured_content)+1}r{r_idx+1}c{c_idx+1}',
                                     'type': 'table-cell',
-                                    'content': text
+                                    'content': text,
+                                    'xml_content': xml_content
                                 })
             except Exception as e:
                 print(f"Warning: Error processing element {type(element)}: {e}")
