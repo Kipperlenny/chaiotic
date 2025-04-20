@@ -5,7 +5,7 @@ import zipfile
 import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Union
 
 # Common XML namespaces for ODT documents
 ODT_NAMESPACES = {

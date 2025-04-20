@@ -1,14 +1,11 @@
 """Module for saving documents with corrections."""
 
 import os
-import datetime
 from typing import List, Dict, Any
 
-from docx.oxml.shared import OxmlElement, qn
-
-# Import from text_utils and xml_utils instead of duplicating functionality
-from .text_utils import FuzzyMatcher, generate_full_text_from_corrections
-from .xml_utils import (create_xml_element, create_tracked_change_region, 
+# Changed to import from utils module at root level
+from utils.text_utils import FuzzyMatcher, generate_full_text_from_corrections
+from utils.xml_utils import (create_xml_element, create_tracked_change_region, 
                       parse_xml_file, write_xml_file, LXML_AVAILABLE)
 
 def save_document(file_path: str, corrections: List[Dict[Any, Any]], original_doc=None, is_docx: bool = True) -> str:

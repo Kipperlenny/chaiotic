@@ -5,17 +5,9 @@ import json
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
-from .document_reader import read_document, read_docx, read_odt, read_text_file
+from .document_reader import read_document
 from .document_extractor import extract_structured_content
-from .docx_handler import (
-    apply_corrections_to_docx,
-    copy_docx_formatting,
-    create_structured_docx
-)
-from .odt_handler import (
-    apply_corrections_to_odt,
-    create_structured_odt
-)
+
 
 def save_document(file_path: str, corrections: Dict[str, Any], 
                  original_doc: Any = None, is_docx: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -98,19 +90,15 @@ def save_document(file_path: str, corrections: Dict[str, Any],
         
         # Apply corrections to document
         try:
-            if is_docx:
-                from .docx_handler import apply_corrections_to_docx
-                doc_path = apply_corrections_to_docx(file_path, corr_list, doc_path)
-            else:
-                from .odt_handler import apply_corrections_to_odt
-                try:
-                    doc_path = apply_corrections_to_odt(file_path, corr_list, doc_path)
-                except Exception as e:
-                    print(f"Error saving ODT: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    text_path = create_fallback_document(corr_list, doc_path, is_docx)
-                    doc_path = None
+            from .odt_handler import apply_corrections_to_odt
+            try:
+                doc_path = apply_corrections_to_odt(file_path, corr_list, doc_path)
+            except Exception as e:
+                print(f"Error saving ODT: {e}")
+                import traceback
+                traceback.print_exc()
+                text_path = create_fallback_document(corr_list, doc_path)
+                doc_path = None
         except Exception as e:
             print(f"Error saving document: {e}")
             doc_path = None

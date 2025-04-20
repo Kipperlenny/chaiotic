@@ -1,9 +1,8 @@
 """Utility functions for document processing."""
 
-import re
 import os
-import logging
 import json
+from typing import Any, Dict, Optional, Tuple
 
 # Try to import optional dependencies
 NLTK_AVAILABLE = False
@@ -23,7 +22,7 @@ except ImportError:
     print("Warning: NLTK not installed. Using fallback text splitting method.")
     # NLTK is not required, we'll use regex-based splitting as fallback
 
-def load_cached_response(request_hash, cache_dir=None):
+def load_cached_response(request_hash: str, cache_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load a cached API response from disk.
     
     Args:
@@ -49,7 +48,7 @@ def load_cached_response(request_hash, cache_dir=None):
         print(f"Error loading cached response: {e}")
         return None
 
-def save_cached_response(request_hash, response, cache_dir=None):
+def save_cached_response(request_hash: str, response: Dict[str, Any], cache_dir: Optional[str] = None) -> bool:
     """Save an API response to the cache.
     
     Args:
@@ -74,7 +73,7 @@ def save_cached_response(request_hash, response, cache_dir=None):
         print(f"Error saving cached response: {e}")
         return False
 
-def format_duration(seconds):
+def format_duration(seconds: float) -> str:
     """Format a duration in seconds to a readable string.
     
     Args:
@@ -95,7 +94,9 @@ def format_duration(seconds):
     
     return " ".join(parts)
 
-def save_document(file_path, corrections, original_doc=None, is_docx=None):
+def save_document(file_path: str, corrections: Dict[str, Any], 
+                 original_doc: Optional[Any] = None, 
+                 is_docx: Optional[bool] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Save corrected content to document files.
     
     Args:
@@ -145,7 +146,9 @@ def save_document(file_path, corrections, original_doc=None, is_docx=None):
         print(f"Error saving document: {e}")
         return None, None, None
 
-def save_document_content(content, file_path, original_doc=None, is_docx=None):
+def save_document_content(content: str, file_path: str, 
+                        original_doc: Optional[Any] = None, 
+                        is_docx: Optional[bool] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Save content to a document file with appropriate formatting.
     
     Args:
@@ -159,7 +162,7 @@ def save_document_content(content, file_path, original_doc=None, is_docx=None):
     """
     try:
         # Import here to avoid circular imports
-        from .document_handler import save_correction_outputs
+        from chaiotic.document_handler import save_correction_outputs
         
         # Create a correction entry for the full text
         corrections = [{

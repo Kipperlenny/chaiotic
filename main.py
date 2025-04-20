@@ -7,12 +7,11 @@ Main entry point for the application
 import argparse
 import os
 import sys
-from chaiotic.grammar_checker import CheckpointHandler
 
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chaiotic: Grammar and Logic Checker')
-    parser.add_argument('--file', type=str, help='Path to the document file (DOCX or ODT)')
+    parser.add_argument('--file', type=str, help='Path to the document file (ODT)')
     parser.add_argument('--structured', action='store_true', help='Use structured content extraction')
     parser.add_argument('--clean-checkpoints', action='store_true', help='Clean up all previous checkpoints')
     parser.add_argument('--keep-checkpoints', action='store_true', help='Keep checkpoints after successful completion')
@@ -30,7 +29,7 @@ def main():
     # Get imports
     from chaiotic.document_handler import read_document, save_document, create_sample_document
     from chaiotic.grammar_checker import check_grammar, display_corrections, CheckpointHandler
-    from chaiotic.text_utils import preprocess_content
+    from utils.text_utils import preprocess_content
     from chaiotic.config import load_config
     
     # Load configuration
@@ -53,7 +52,7 @@ def main():
         # Get file path
         file_path = args.file
         if not file_path:
-            file_path = input("Enter the path to the document file (DOCX or ODT): ").strip()
+            file_path = input("Enter the path to the document file (ODT): ").strip()
         
         # Use default if no input
         if not file_path:
@@ -67,11 +66,9 @@ def main():
         
         # Validate file extension
         file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext not in ['.docx', '.odt']:
-            print("Please provide a valid .docx or .odt file.")
+        if file_ext not in ['.odt']:
+            print("Please provide a valid .odt file.")
             return 1
-        
-        is_docx = file_ext == '.docx'
         
         # Check if file exists
         if not os.path.exists(file_path):
@@ -94,7 +91,7 @@ def main():
             
             # Read the document content
             print(f"Reading document: {file_path}")
-            content, structured_content, is_docx = read_document(file_path)
+            content, structured_content = read_document(file_path)
             
             # Use structured content if available and requested
             if use_structured and structured_content and isinstance(structured_content, list):
@@ -129,8 +126,7 @@ def main():
             json_path, text_path, doc_path = save_document(
                 file_path,
                 corrections,
-                original_doc=None,
-                is_docx=is_docx
+                original_doc=None
             )
             
             if json_path:

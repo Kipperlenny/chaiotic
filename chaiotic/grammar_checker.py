@@ -5,11 +5,9 @@ import re
 import time
 import os
 import hashlib
-import difflib
-import shutil
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any
 
-from chaiotic.text_utils import split_text_into_chunks
+from utils.text_utils import split_text_into_chunks
 
 from .config import DISABLE_CACHE, GPT4O_MINI_MODEL
 from .ai_interface import check_grammar_with_ai

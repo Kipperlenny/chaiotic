@@ -3,17 +3,7 @@
 import os
 import re
 import zipfile
-import io
 from lxml import etree
-from typing import Tuple, List, Dict, Any, Optional
-
-# Check for docx library availability
-DOCX_AVAILABLE = False
-try:
-    from docx import Document
-    DOCX_AVAILABLE = True
-except ImportError:
-    DOCX_AVAILABLE = False
 
 # Check for odf library availability and get element classes
 ODF_AVAILABLE = False
@@ -30,75 +20,13 @@ def read_document(file_path):
     """Read document content and return structured format."""
     file_ext = os.path.splitext(file_path)[1].lower()
     
-    if file_ext == '.docx':
-        content, structured_content = read_docx(file_path)
-        return content, structured_content, True
-    elif file_ext == '.odt':
+    if file_ext == '.odt':
         content, structured_content = read_odt(file_path)
         # No need for conversion since read_odt now returns proper format
-        return content, structured_content, False
+        return content, structured_content
     else:
         content = read_text_file(file_path)
-        return content, None, True
-
-def read_docx(file_path):
-    """Read content from a DOCX file and return structured representation."""
-    try:
-        print(f"Reading DOCX file: {file_path}")
-        
-        doc = Document(file_path)
-        full_text = []
-        structured_content = []
-        element_id = 0
-        
-        # Extract each paragraph
-        for paragraph in doc.paragraphs:
-            text = paragraph.text.strip()
-            if text:
-                full_text.append(text)
-                element_id += 1
-                
-                # Add to structured content with metadata
-                structured_content.append({
-                    'id': f'p{element_id}',
-                    'type': 'paragraph',
-                    'content': text,
-                    'style': paragraph.style.name
-                })
-        
-        # Also extract tables if present
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        text = paragraph.text.strip()
-                        if text:
-                            full_text.append(text)
-                            element_id += 1
-                            
-                            # Add to structured content with metadata
-                            structured_content.append({
-                                'id': f'p{element_id}',
-                                'type': 'table_cell',
-                                'content': text,
-                                'style': paragraph.style.name
-                            })
-        
-        full_content = '\n\n'.join(full_text)
-        print(f"Extracted {len(structured_content)} structured elements from document")
-        return full_content, structured_content
-        
-    except Exception as e:
-        print(f"Error reading DOCX file: {e}")
-        return "", []
-
-def read_docx_xml(file_path):
-    """Read a DOCX document by parsing its XML directly."""
-    # ...existing code...
-
-def read_docx_as_zip(file_path):
-    """Read a DOCX as a simple ZIP and extract text from document.xml."""
-    # ...existing code...
+        return content, None
 
 def read_odt(file_path):
     """Read an ODT file and return its content as text."""
@@ -179,8 +107,94 @@ def read_odt_xml(file_path):
 
 def read_odt_as_zip(file_path):
     """Read an ODT as a simple ZIP and extract text from content.xml."""
-    # ...existing code...
+    try:
+        content = []
+        structured_content = []
+        
+        with zipfile.ZipFile(file_path) as odt:
+            # Check if content.xml exists
+            if 'content.xml' not in odt.namelist():
+                raise ValueError("Invalid ODT file: content.xml not found")
+                
+            # Extract content.xml as text
+            content_xml = odt.read('content.xml').decode('utf-8')
+            
+            # Simple regex-based extraction for paragraphs
+            # This is a last resort method when proper XML parsing fails
+            paragraphs = re.findall(r'<text:p[^>]*>(.*?)</text:p>', content_xml, re.DOTALL)
+            headings = re.findall(r'<text:h[^>]*>(.*?)</text:h>', content_xml, re.DOTALL)
+            
+            # Clean up XML tags from content
+            for i, p in enumerate(paragraphs):
+                # Remove XML tags
+                clean_text = re.sub(r'<[^>]+>', ' ', p).strip()
+                # Normalize whitespace
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                
+                if clean_text:
+                    content.append(clean_text)
+                    structured_content.append({
+                        'id': f'p{i+1}',
+                        'type': 'paragraph',
+                        'content': clean_text
+                    })
+            
+            # Process headings similarly
+            for i, h in enumerate(headings):
+                clean_text = re.sub(r'<[^>]+>', ' ', h).strip()
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                
+                if clean_text:
+                    content.append(clean_text)
+                    structured_content.append({
+                        'id': f'h{i+1}',
+                        'type': 'heading',
+                        'content': clean_text
+                    })
+        
+        if not content:
+            return "Failed to extract text from ODT file.", []
+            
+        return '\n\n'.join(content), structured_content
+        
+    except Exception as e:
+        print(f"Error extracting content from ODT as ZIP: {e}")
+        return f"Error reading document: {str(e)}", []
 
 def read_text_file(file_path):
     """Read a plain text file."""
-    # ...existing code...
+    try:
+        encodings = ['utf-8', 'latin-1', 'cp1252', 'ascii']
+        
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                print(f"Successfully read text file with {encoding} encoding")
+                return content
+            except UnicodeDecodeError:
+                continue
+        
+        # If all encodings fail, try binary and attempt to detect
+        with open(file_path, 'rb') as f:
+            binary_content = f.read()
+            
+        # Try to detect encoding from BOM
+        if binary_content.startswith(b'\xef\xbb\xbf'):
+            # UTF-8 with BOM
+            content = binary_content[3:].decode('utf-8')
+        elif binary_content.startswith(b'\xff\xfe'):
+            # UTF-16 (LE)
+            content = binary_content[2:].decode('utf-16-le')
+        elif binary_content.startswith(b'\xfe\xff'):
+            # UTF-16 (BE)
+            content = binary_content[2:].decode('utf-16-be')
+        else:
+            # Last resort: try UTF-8 ignoring errors
+            content = binary_content.decode('utf-8', errors='replace')
+        
+        return content
+        
+    except Exception as e:
+        print(f"Error reading text file: {e}")
+        return f"Error reading document: {str(e)}"

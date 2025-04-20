@@ -2,15 +2,12 @@
 
 import re
 import json
-import os
 import logging
-from datetime import datetime
 
 # Import text utilities
-from .text_utils import (
+from utils.text_utils import (
     sanitize_response,
-    split_text_into_chunks,
-    generate_full_text_from_corrections
+    split_text_into_chunks
 )
 
 # Try to import OpenAI

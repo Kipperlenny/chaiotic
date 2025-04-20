@@ -2,11 +2,8 @@
 
 import os
 import re
-import zipfile
-from lxml import etree
-from typing import List, Dict, Any
 
-from .document_reader import DOCX_AVAILABLE, ODF_AVAILABLE, read_document
+from .document_reader import ODF_AVAILABLE
 
 def extract_structured_content(file_path):
     """Extract structured content from a document, preserving paragraph metadata.
