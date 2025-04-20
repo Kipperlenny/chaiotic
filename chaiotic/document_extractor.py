@@ -22,151 +22,12 @@ def extract_structured_content(file_path):
     """
     file_ext = os.path.splitext(file_path)[1].lower()
     
-    if file_ext == '.docx':
-        return extract_structured_docx(file_path)
-    elif file_ext == '.odt':
+    if file_ext == '.odt':
         return extract_structured_odt(file_path)
     elif file_ext == '.txt':
         return extract_structured_text(file_path)
     else:
         raise ValueError(f"Unsupported file type: {file_ext}")
-
-def extract_structured_docx(file_path):
-    """Extract structured content from a DOCX file."""
-    try:
-        if not DOCX_AVAILABLE:
-            print("python-docx library not available. Using basic XML parsing for structured DOCX.")
-            print("For better results, install: pip install python-docx")
-            return extract_structured_docx_xml(file_path)
-        
-        from docx import Document
-        doc = Document(file_path)
-        structured_content = []
-        
-        # Process paragraphs
-        for i, para in enumerate(doc.paragraphs):
-            if not para.text.strip():
-                continue  # Skip empty paragraphs
-                
-            # Determine paragraph type based on style
-            para_type = "paragraph"
-            if para.style.name.startswith('Heading'):
-                para_type = f"heading-{para.style.name.split(' ')[-1]}"
-            elif para.style.name == 'List Paragraph':
-                para_type = "list-item"
-                
-            structured_content.append({
-                'id': f'p{i+1}',
-                'type': para_type,
-                'content': para.text
-            })
-        
-        # Process tables
-        for t_idx, table in enumerate(doc.tables):
-            for r_idx, row in enumerate(table.rows):
-                for c_idx, cell in enumerate(row.cells):
-                    # Combine all paragraphs in a cell
-                    cell_text = '\n'.join(p.text for p in cell.paragraphs if p.text.strip())
-                    if cell_text.strip():
-                        structured_content.append({
-                            'id': f't{t_idx+1}r{r_idx+1}c{c_idx+1}',
-                            'type': 'table-cell',
-                            'content': cell_text
-                        })
-        
-        return structured_content
-    except Exception as e:
-        print(f"Error extracting structured content from DOCX: {e}")
-        # Fall back to XML parsing
-        try:
-            return extract_structured_docx_xml(file_path)
-        except Exception as e2:
-            print(f"XML fallback failed: {e2}")
-            # Last resort - use simple text
-            content, _, _ = read_document(file_path)
-            return extract_structured_text_from_content(content)
-
-def extract_structured_docx_xml(file_path):
-    """Extract structured content from a DOCX file using XML parsing."""
-    import zipfile
-    import xml.etree.ElementTree as ET
-    
-    try:
-        # Try to use lxml for better XML handling
-        import lxml.etree as LET
-        parser = LET
-    except ImportError:
-        parser = ET
-    
-    structured_content = []
-    
-    try:
-        with zipfile.ZipFile(file_path) as docx:
-            # Read document.xml
-            with docx.open('word/document.xml') as content:
-                tree = parser.parse(content)
-                root = tree.getroot()
-                
-                # Define namespaces
-                ns = {
-                    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-                }
-                
-                # Extract paragraphs
-                for i, para in enumerate(root.findall('.//w:p', ns)):
-                    para_text = []
-                    style = None
-                    
-                    # Get paragraph style
-                    style_elem = para.find('.//w:pStyle', ns)
-                    if style_elem is not None:
-                        style = style_elem.get('{%s}val' % ns['w'])
-                    
-                    # Get text runs
-                    for run in para.findall('.//w:t', ns):
-                        if run.text:
-                            para_text.append(run.text)
-                    
-                    text = ''.join(para_text).strip()
-                    if text:
-                        para_type = "paragraph"
-                        if style and style.startswith('Heading'):
-                            level = style.replace('Heading', '')
-                            try:
-                                level = int(level)
-                                para_type = f"heading-{level}"
-                            except ValueError:
-                                para_type = "heading"
-                        
-                        structured_content.append({
-                            'id': f'p{i+1}',
-                            'type': para_type,
-                            'content': text
-                        })
-                
-                # Extract tables
-                for t_idx, table in enumerate(root.findall('.//w:tbl', ns)):
-                    for r_idx, row in enumerate(table.findall('.//w:tr', ns)):
-                        for c_idx, cell in enumerate(row.findall('.//w:tc', ns)):
-                            cell_text = []
-                            for para in cell.findall('.//w:p', ns):
-                                for run in para.findall('.//w:t', ns):
-                                    if run.text:
-                                        cell_text.append(run.text)
-                            
-                            text = ' '.join(cell_text).strip()
-                            if text:
-                                structured_content.append({
-                                    'id': f't{t_idx+1}r{r_idx+1}c{c_idx+1}',
-                                    'type': 'table-cell',
-                                    'content': text
-                                })
-        
-        return structured_content
-        
-    except Exception as e:
-        print(f"Error extracting DOCX XML content: {e}")
-        return []
 
 def extract_structured_odt(file_path):
     """Extract structured content from an ODT file."""
@@ -183,38 +44,85 @@ def extract_structured_odt(file_path):
         structured_content = []
         
         def get_text_content(element):
-            """Extract text from an ODT element."""
+            """Extract text from an ODT element with better handling of nested structures."""
             parts = []
-            for child in element.childNodes:
-                if hasattr(child, 'data'):
-                    parts.append(child.data)
-                elif isinstance(child, Span):
-                    parts.append(get_text_content(child))
+            # Add debugging to track complex nesting
+            element_type = element.__class__.__name__
+            
+            try:
+                # For Span elements and similar nested structures
+                if hasattr(element, 'childNodes'):
+                    for child in element.childNodes:
+                        if hasattr(child, 'data'):
+                            parts.append(child.data)
+                        elif hasattr(child, 'childNodes'):
+                            # Handle nested elements
+                            parts.append(get_text_content(child))
+                    
+                # Some elements might just have a text attribute
+                elif hasattr(element, 'text'):
+                    if element.text:
+                        parts.append(element.text)
+                    
+                    # Handle children using ElementTree-style API
+                    for child in element:
+                        parts.append(get_text_content(child))
+                        if child.tail:
+                            parts.append(child.tail)
+                
+                # Handle direct text content
+                elif hasattr(element, 'data'):
+                    parts.append(element.data)
+            except Exception as e:
+                print(f"Warning: Error extracting text from {element_type}: {e}")
+                
             return ''.join(parts)
         
-        # Process paragraphs and headings
+        # Process paragraphs and headings with better tracking of nested elements
         idx = 0
         for element in doc.text.childNodes:
-            if isinstance(element, (P, H)):
-                text = get_text_content(element)
-                if text.strip():
-                    idx += 1
-                    structured_content.append({
-                        'id': f'p{idx}',
+            try:
+                if isinstance(element, (P, H)):
+                    text = get_text_content(element)
+                    element_info = {
                         'type': 'heading' if isinstance(element, H) else 'paragraph',
-                        'content': text
-                    })
-            elif isinstance(element, Table):
-                for r_idx, row in enumerate(element.getElementsByType(TableRow)):
-                    for c_idx, cell in enumerate(row.getElementsByType(TableCell)):
-                        text = get_text_content(cell)
-                        if text.strip():
-                            idx += 1
-                            structured_content.append({
-                                'id': f't{len(structured_content)+1}r{r_idx+1}c{c_idx+1}',
-                                'type': 'table-cell',
-                                'content': text
-                            })
+                        'text': text,
+                        'nested': []
+                    }
+                    
+                    # Check for nested spans and other elements
+                    if hasattr(element, 'childNodes'):
+                        for child in element.childNodes:
+                            if isinstance(child, Span):
+                                span_text = get_text_content(child)
+                                if span_text.strip():
+                                    element_info['nested'].append({
+                                        'type': 'span',
+                                        'text': span_text
+                                    })
+                    
+                    if text.strip():
+                        idx += 1
+                        structured_content.append({
+                            'id': f'p{idx}',
+                            'type': element_info['type'],
+                            'content': text,
+                            'metadata': {'nested_elements': element_info['nested']}
+                        })
+                elif isinstance(element, Table):
+                    for r_idx, row in enumerate(element.getElementsByType(TableRow)):
+                        for c_idx, cell in enumerate(row.getElementsByType(TableCell)):
+                            text = get_text_content(cell)
+                            if text.strip():
+                                idx += 1
+                                structured_content.append({
+                                    'id': f't{len(structured_content)+1}r{r_idx+1}c{c_idx+1}',
+                                    'type': 'table-cell',
+                                    'content': text
+                                })
+            except Exception as e:
+                print(f"Warning: Error processing element {type(element)}: {e}")
+                continue
         
         return structured_content
         

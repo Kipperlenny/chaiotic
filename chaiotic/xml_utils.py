@@ -107,7 +107,8 @@ def create_tracked_change_region(change_id: str, change_type: str, text: str,
     # Add the change_info to the change element
     change_elem.append(change_info)
     
-    # Add content as paragraph if text is provided
+    # Add text content as a separate paragraph after the change-info, as child of the change element
+    # This is the correct interpretation of the ODT spec
     if text:
         content = create_xml_element('text:p', text=text, nsmap=nsmap)
         change_elem.append(content)

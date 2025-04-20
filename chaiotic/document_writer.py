@@ -209,7 +209,9 @@ def apply_corrections_to_odt(file_path, corrections, output_path):
             # Process paragraphs
             paragraphs = root.findall('.//text:p', nsmap)
             changes_by_para = {}
-            change_id = 1
+            
+            # Initialize a master change_id at module level to ensure unique IDs across all changes
+            master_change_id = 1
             
             # First pass: Identify changes and create change regions
             for i, para in enumerate(paragraphs):
@@ -220,9 +222,10 @@ def apply_corrections_to_odt(file_path, corrections, output_path):
                 for corr in corrections:
                     original = corr.get('original', '')
                     if original and original in para_text:
-                        # Create two separate change IDs for deletion and insertion
-                        del_change_id = f"ctd{change_id}"
-                        ins_change_id = f"cti{change_id}"
+                        # Using the master_change_id to ensure unique IDs
+                        del_change_id = f"ctd{master_change_id}"
+                        ins_change_id = f"cti{master_change_id}"
+                        master_change_id += 1  # Increment for next change
                         
                         change = {
                             'del_id': del_change_id,
@@ -247,8 +250,6 @@ def apply_corrections_to_odt(file_path, corrections, output_path):
                             user, timestamp, nsmap
                         )
                         tracked_changes.append(insertion_region)
-                        
-                        change_id += 1
                         
                 if para_changes:
                     changes_by_para[para_id] = sorted(para_changes, key=lambda x: x['start'])
