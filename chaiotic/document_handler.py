@@ -1,14 +1,237 @@
 """Document handler module for reading and writing documents."""
 
-# This file now serves as a facade for our modular document handling system
-# and maintains backward compatibility with existing code
+import os
+import json
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
 
 from .document_reader import read_document, read_docx, read_odt, read_text_file
 from .document_extractor import extract_structured_content
-from .document_writer import save_document
-from .document_creator import create_sample_document
+from .docx_handler import (
+    apply_corrections_to_docx,
+    copy_docx_formatting,
+    create_structured_docx
+)
+from .odt_handler import (
+    apply_corrections_to_odt,
+    create_structured_odt
+)
 
-import os
+def save_document(file_path: str, corrections: Dict[str, Any], 
+                 original_doc: Any = None, is_docx: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Save document with corrections while preserving formatting.
+    
+    Args:
+        file_path: Path to the original document
+        corrections: Dictionary with corrections and metadata
+        original_doc: Original document object if available
+        is_docx: Whether the document is DOCX (True) or ODT (False)
+    
+    Returns:
+        Tuple of (json_path, text_path, doc_path), any may be None on error
+    """
+    # Generate output filenames with timestamp
+    file_dir = os.path.dirname(file_path) or '.'
+    file_base = os.path.splitext(os.path.basename(file_path))[0]
+    file_ext = os.path.splitext(file_path)[1]
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    json_path = os.path.join(file_dir, f"{file_base}_corrections_{timestamp}.json")
+    text_path = os.path.join(file_dir, f"{file_base}_corrections_{timestamp}.txt")
+    doc_path = os.path.join(file_dir, f"{file_base}_corrected_{timestamp}{file_ext}")
+    
+    try:
+        # Normalize corrections to list format
+        if isinstance(corrections, dict):
+            if 'corrections' in corrections:
+                corr_list = corrections['corrections']
+                corrected_full_text = corrections.get('corrected_full_text', '')
+            else:
+                corr_list = [corrections] if corrections else []
+                corrected_full_text = ''
+        elif isinstance(corrections, list):
+            corr_list = corrections
+            corrected_full_text = ''
+        else:
+            corr_list = [corrections] if corrections else []
+            corrected_full_text = ''
+        
+        # Save JSON file with metadata
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json_data = {
+                    'corrections': corr_list,
+                    'metadata': {
+                        'timestamp': datetime.now().isoformat(),
+                        'original_file': file_path
+                    }
+                }
+                if corrected_full_text:
+                    json_data['corrected_full_text'] = corrected_full_text
+                
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving JSON: {e}")
+            json_path = None
+        
+        # Save text file with human-readable corrections
+        try:
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write("CORRECTIONS:\n\n")
+                for i, corr in enumerate(corr_list, 1):
+                    if isinstance(corr, dict):
+                        f.write(f"{i}. Original: {corr.get('original', '')}\n")
+                        f.write(f"   Corrected: {corr.get('corrected', '')}\n")
+                        if 'explanation' in corr:
+                            f.write(f"   Explanation: {corr['explanation']}\n")
+                    elif isinstance(corr, str):
+                        f.write(f"{i}. Correction: {corr}\n")
+                    f.write("\n")
+                
+                # Add the full corrected text if available
+                if corrected_full_text:
+                    f.write("\n\nCORRECTED FULL TEXT:\n\n")
+                    f.write(corrected_full_text)
+        except Exception as e:
+            print(f"Error saving text file: {e}")
+            text_path = None
+        
+        # Apply corrections to document
+        try:
+            if is_docx:
+                from .docx_handler import apply_corrections_to_docx
+                doc_path = apply_corrections_to_docx(file_path, corr_list, doc_path)
+            else:
+                from .odt_handler import apply_corrections_to_odt
+                try:
+                    doc_path = apply_corrections_to_odt(file_path, corr_list, doc_path)
+                except Exception as e:
+                    print(f"Error saving ODT: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    text_path = create_fallback_document(corr_list, doc_path, is_docx)
+                    doc_path = None
+        except Exception as e:
+            print(f"Error saving document: {e}")
+            doc_path = None
+    
+    except Exception as e:
+        print(f"Error in save_document: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None
+    
+    return json_path, text_path, doc_path
+
+def save_document_content(content: str, file_path: str, 
+                         original_doc: Any = None, is_docx: bool = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Save content to a document file with appropriate formatting.
+    
+    Args:
+        content: Text content to write.
+        file_path: Path where to save the document.
+        original_doc: Original document object to preserve formatting.
+        is_docx: Boolean indicating if the file is a DOCX (True) or ODT (False).
+        
+    Returns:
+        Tuple of (json_path, text_path, doc_path)
+    """
+    try:
+        # Create a correction entry for the full text
+        corrections = {
+            'corrections': [{
+                'original': '',  # Empty since this is a full text replacement
+                'corrected': content,
+                'type': 'full_text'
+            }],
+            'corrected_full_text': content
+        }
+        
+        return save_document(file_path, corrections, original_doc, is_docx)
+    except Exception as e:
+        print(f"Error saving document content: {e}")
+        return None, None, None
+
+def save_correction_outputs(file_path: str, corrections: List[Dict[str, Any]], 
+                           original_doc: Any = None, is_docx: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Save correction outputs to files.
+    This function is maintained for compatibility but delegates to save_document.
+    
+    Args:
+        file_path: Original document file path
+        corrections: List of corrections or dictionary with corrections
+        original_doc: Original document object
+        is_docx: Whether the document is a DOCX file
+        
+    Returns:
+        Tuple of (json_path, text_path, doc_path)
+    """
+    # Just delegate to the main save_document function
+    return save_document(file_path, corrections, original_doc, is_docx)
+
+def create_fallback_document(corrections, output_path, is_docx):
+    """Create a simple document with corrections when main save fails.
+    
+    Args:
+        corrections: Correction data (dict or list)
+        output_path: Output file path
+        is_docx: Whether to create DOCX (True) or ODT (False)
+        
+    Returns:
+        Path to the saved document
+    """
+    try:
+        # Convert corrections to list format if needed
+        if isinstance(corrections, dict):
+            corrections_list = corrections.get('corrections', [])
+        elif isinstance(corrections, list):
+            corrections_list = corrections
+        else:
+            corrections_list = [corrections] if corrections else []
+        
+        # Create text file with corrections
+        text_path = f"{output_path}.txt"
+        with open(text_path, 'w', encoding='utf-8') as f:
+            f.write("CORRECTIONS:\n\n")
+            for i, corr in enumerate(corrections_list, 1):
+                if isinstance(corr, dict):
+                    f.write(f"{i}. Original: {corr.get('original', '')}\n")
+                    f.write(f"   Corrected: {corr.get('corrected', '')}\n")
+                    if 'explanation' in corr:
+                        f.write(f"   Explanation: {corr['explanation']}\n")
+                elif isinstance(corr, str):
+                    f.write(f"{i}. Correction: {corr}\n")
+                f.write("\n")
+        
+        # Try to create a simple document if possible
+        if is_docx:
+            try:
+                from docx import Document
+                doc = Document()
+                for i, corr in enumerate(corrections_list, 1):
+                    if isinstance(corr, dict):
+                        p = doc.add_paragraph(f"{i}. Original: ")
+                        p.add_run(corr.get('original', '')).bold = True
+                        p.add_run("\nCorrected: ")
+                        p.add_run(corr.get('corrected', '')).italic = True
+                        if 'explanation' in corr:
+                            p.add_run("\nExplanation: ")
+                            p.add_run(corr.get('explanation', ''))
+                    else:
+                        doc.add_paragraph(f"{i}. {corr}")
+                    doc.add_paragraph("")
+                
+                doc_path = f"{output_path}.docx"
+                doc.save(doc_path)
+                return doc_path
+            except Exception as e:
+                print(f"Could not create fallback DOCX: {e}")
+                
+        return text_path
+        
+    except Exception as e:
+        print(f"Error creating fallback document: {e}")
+        return None
 
 def create_sample_document(file_path):
     """Create a sample document file for testing.
@@ -228,6 +451,8 @@ def create_sample_document(file_path):
 __all__ = [
     'read_document',
     'save_document',
+    'save_document_content',
+    'save_correction_outputs',
     'create_sample_document',
     'extract_structured_content'
 ]

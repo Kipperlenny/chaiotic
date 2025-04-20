@@ -7,13 +7,10 @@ Main entry point for the application
 import argparse
 import os
 import sys
+from chaiotic.grammar_checker import CheckpointHandler
 
-def main():
-    """Main entry point for the application."""
-    # Add parent directory to sys.path to allow imports
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    
-    # Parse command-line arguments
+def parse_arguments():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Chaiotic: Grammar and Logic Checker')
     parser.add_argument('--file', type=str, help='Path to the document file (DOCX or ODT)')
     parser.add_argument('--structured', action='store_true', help='Use structured content extraction')
@@ -21,61 +18,64 @@ def main():
     parser.add_argument('--keep-checkpoints', action='store_true', help='Keep checkpoints after successful completion')
     parser.add_argument('--max-checkpoints', type=int, default=5, help='Maximum number of checkpoints to keep')
     parser.add_argument('--nocache', action='store_true', help='Disable API request caching')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+def main():
+    """Main entry point for the application."""
+    args = parse_arguments()
+    
+    # Add parent directory to sys.path to allow imports
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    
+    # Get imports
+    from chaiotic.document_handler import read_document, save_document, create_sample_document
+    from chaiotic.grammar_checker import check_grammar, display_corrections, CheckpointHandler
+    from chaiotic.utils import preprocess_content
+    from chaiotic.config import load_config
+    
+    # Load configuration
+    config = load_config()
+    if args.nocache:
+        config.set_cache_enabled(False)
+    
+    # Initialize checkpoint handler
+    checkpoint_handler = CheckpointHandler(
+        max_checkpoints=args.max_checkpoints,
+        keep_last=args.keep_checkpoints
+    )
+    
+    # Clean checkpoints if requested
+    if args.clean_checkpoints:
+        checkpoint_handler.purge_all_checkpoints()
+        print("All checkpoints purged.")
     
     try:
-        # Import necessary modules
-        from chaiotic.document_handler import read_document, save_document, create_sample_document, extract_structured_content
-        from chaiotic.document_writer import save_correction_outputs
-        from chaiotic.grammar_checker import check_grammar, display_corrections, CheckpointHandler
-        from chaiotic.utils import preprocess_content
-        from chaiotic.config import load_config
-        
-        # Load configuration and set cache settings
-        config = load_config()
-        if args.nocache:
-            config.set_cache_enabled(False)
-        
-        # Initialize checkpoint handler
-        checkpoint_handler = CheckpointHandler(
-            max_checkpoints=args.max_checkpoints, 
-            keep_last=args.keep_checkpoints
-        )
-        
-        # Clean checkpoints if requested
-        if args.clean_checkpoints:
-            checkpoint_handler.purge_all_checkpoints()
-            print("All checkpoints purged.")
-        
-        # Get file path from command line args or prompt user
+        # Get file path
         file_path = args.file
         if not file_path:
-            file_path = input("Enter the path to the document file (DOCX or ODT): ")
-
-        # If nothing is entered, use test.odt
+            file_path = input("Enter the path to the document file (DOCX or ODT): ").strip()
+        
+        # Use default if no input
         if not file_path:
             file_path = 'test.odt'
             print(f"No file path provided. Using default: {file_path}")
             
-            # If default file doesn't exist, create a sample file
+            # Create sample file if needed
             if not os.path.exists(file_path):
-                print(f"Default file {file_path} not found. Creating sample file...")
+                print(f"Creating sample file: {file_path}")
                 create_sample_document(file_path)
-
-        # Check file extension
+        
+        # Validate file extension
         file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext == '.docx':
-            is_docx = True
-        elif file_ext == '.odt':
-            is_docx = False
-        else:
+        if file_ext not in ['.docx', '.odt']:
             print("Please provide a valid .docx or .odt file.")
             return 1
-            
+        
+        is_docx = file_ext == '.docx'
+        
         # Check if file exists
         if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
-            print("Please provide a valid file path.")
             return 1
         
         # Ask user what they want to do
@@ -94,26 +94,18 @@ def main():
             
             # Read the document content
             print(f"Reading document: {file_path}")
-            content, doc_obj, is_docx = read_document(file_path)
+            content, structured_content, is_docx = read_document(file_path)
             
-            # Extract structured content if needed
-            if use_structured:
-                print("Using structured content extraction...")
-                # Fix: extract_structured_content expects just the file path
-                structured_content = extract_structured_content(file_path)
-                
-                # Check if we got valid structured content
-                if not isinstance(structured_content, (list, dict)) or len(structured_content) == 0:
-                    print("No structured content found. Falling back to full text processing.")
-                    use_structured = False
-                    structured_content = None
-                else:
-                    print(f"Extracted {len(structured_content)} structured elements.")
+            # Use structured content if available and requested
+            if use_structured and structured_content and isinstance(structured_content, list):
+                print(f"Using structured content with {len(structured_content)} elements")
             else:
+                use_structured = False
                 structured_content = None
-            
+                print("Using standard content processing")
+
             # Show preview of the content
-            preview_length = min(200, len(content))
+            preview_length = min(200, len(content) if content else 0)
             print(f"\nPreview of '{file_path}':")
             print("=" * 40)
             print(content[:preview_length] + ("..." if len(content) > preview_length else ""))
@@ -126,21 +118,27 @@ def main():
             # Process with structure-aware grammar checker or standard checker
             corrections = check_grammar(content, structured_content, use_structured, checkpoint_handler=checkpoint_handler)
             
-            # Display corrections
-            if corrections:
-                print("\nCorrections:")
+            # Display corrections if available
+            if isinstance(corrections, dict) and 'corrections' in corrections:
+                display_corrections(corrections['corrections'])
+            elif isinstance(corrections, list):
                 display_corrections(corrections)
-                
-                # Ask if user wants to save corrections
-                save_prompt = input("\nDo you want to save corrections to a new document? (y/n): ").lower()
-                if save_prompt == 'y' or save_prompt == 'yes':
-                    # Save corrections
-                    json_path, text_path, doc_path = save_correction_outputs(file_path, corrections, doc_obj, is_docx)
-                    print(f"\nOutput files: \n- {json_path}\n- {text_path}\n- {doc_path}")
-                else:
-                    print("Corrections not saved.")
-            else:
-                print("No corrections found or failed to process corrections.")
+
+            # Save document with corrections
+            print("\nSaving corrected document...")
+            json_path, text_path, doc_path = save_document(
+                file_path,
+                corrections,
+                original_doc=None,
+                is_docx=is_docx
+            )
+            
+            if json_path:
+                print(f"\nSaved corrections to: {json_path}")
+            if text_path:
+                print(f"Saved text version to: {text_path}")
+            if doc_path:
+                print(f"Saved corrected document to: {doc_path}")
             
             # Clean up checkpoints after successful completion (if not keeping them)
             if not args.keep_checkpoints:
@@ -156,6 +154,9 @@ def main():
         else:
             print("Invalid choice. Exiting.")
         
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        return 1
     except Exception as e:
         import traceback
         print(f"Error: {e}")

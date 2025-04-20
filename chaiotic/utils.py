@@ -352,13 +352,20 @@ def save_document_content(content, file_path, original_doc=None, is_docx=None):
         is_docx: Boolean indicating if the file is a DOCX (True) or ODT (False).
         
     Returns:
-        Path to the saved document or None on error.
+        Tuple of (json_path, text_path, doc_path) or None on error.
     """
     try:
         # Import here to avoid circular imports
-        from chaiotic.document_handler import save_document as handler_save_document
+        from .document_handler import save_correction_outputs
         
-        return handler_save_document(content, file_path, original_doc, is_docx)
+        # Create a correction entry for the full text
+        corrections = [{
+            'original': '',  # Empty since this is a full text replacement
+            'corrected': content,
+            'type': 'full_text'
+        }]
+        
+        return save_correction_outputs(file_path, corrections, original_doc, is_docx)
     except Exception as e:
         print(f"Error saving document content: {e}")
-        return None
+        return None, None, None

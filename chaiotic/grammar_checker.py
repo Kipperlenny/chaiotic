@@ -588,17 +588,24 @@ def parse_json_response(response):
         }
 
 def display_corrections_table(corrections):
-    """Display corrections in a readable table format in the terminal."""
-    # Handle different formats of corrections input
-    if isinstance(corrections, list):
-        # If corrections is already a list, use it directly
+    """Display corrections in a readable table format in the terminal.
+    
+    Args:
+        corrections: Correction data (dict, list, or individual correction)
+    """
+    # Extract corrections list from various possible formats
+    corrections_list = []
+    
+    if isinstance(corrections, dict):
+        # Handle dictionary with 'corrections' key
+        if 'corrections' in corrections and isinstance(corrections['corrections'], list):
+            corrections_list = corrections['corrections']
+        # Handle single correction dictionary
+        elif 'original' in corrections and 'corrected' in corrections:
+            corrections_list = [corrections]
+    elif isinstance(corrections, list):
+        # Handle list of corrections
         corrections_list = corrections
-    elif isinstance(corrections, dict) and 'corrections' in corrections:
-        # If corrections is a dict with a 'corrections' key, use that
-        corrections_list = corrections.get('corrections', [])
-    else:
-        # Default to empty list if unknown format
-        corrections_list = []
     
     # Check if we have any corrections to display
     if not corrections_list or len(corrections_list) == 0:
@@ -609,108 +616,80 @@ def display_corrections_table(corrections):
     print("GRAMMATIK- UND RECHTSCHREIBKORREKTUREN")
     print("="*80)
     
+    valid_correction_count = 0
     for i, correction in enumerate(corrections_list, 1):
-        if isinstance(correction, dict):
+        if isinstance(correction, dict) and 'original' in correction and 'corrected' in correction:
             original = correction.get('original', 'N/A')
             corrected = correction.get('corrected', 'N/A')
             explanation = correction.get('explanation', 'Keine Erklärung verfügbar')
+            
             print(f"\n{i}. ORIGINAL: {original}")
             print(f"   KORRIGIERT: {corrected}")
             print(f"   BEGRÜNDUNG: {explanation}")
             print("-"*80)
-        else:
-            print(f"\n{i}. WARNUNG: Ungültiges Korrekturformat: {correction}")
-            print("-"*80)
+            valid_correction_count += 1
+    
+    if valid_correction_count == 0:
+        print("\nKeine validen Korrekturen gefunden.")
+    else:
+        print(f"\n{valid_correction_count} Korrekturen gefunden.")
+    
+    # Don't display warnings about invalid formats
+    # This removes the "WARNUNG: Ungültiges Korrekturformat" messages
 
-def check_grammar_structured(structured_content, checkpoint_handler=None) -> List[Dict[str, Any]]:
-    """
-    Check grammar and spelling in structured content (paragraph by paragraph).
+def check_grammar_structured(text, structured_content=None, checkpoint_handler=None):
+    """Check grammar using structured content analysis.
     
     Args:
-        structured_content: The structured content to check
-        checkpoint_handler: Optional checkpoint handler
+        text: Full text to check
+        structured_content: Optional structured content from document
+        checkpoint_handler: Optional checkpoint handler for progress tracking
         
     Returns:
         List of corrections
     """
-    if not structured_content or not isinstance(structured_content, (list, dict)):
-        print("No valid structured content to process.")
-        return []
-        
-    print(f"Processing {len(structured_content)} document elements...")
+    corrections = []
+    total_chunks = len(structured_content) if structured_content else 1
     
-    all_corrections = []
-    
-    # Create a map to store original and corrected content by ID
-    corrections_map = {}
-    
-    # Process each paragraph separately
-    print(f"Processing {len(structured_content)} document elements...")
-    
-    for i, element in enumerate(structured_content):
-        element_id = element.get('id', f'item{i}')
-        content = element.get('content', '').strip()
-        
-        # Skip empty or very short content
-        if not content or len(content) < 3:
-            corrections_map[element_id] = {
-                "original": content,
-                "corrected": content,
-                "has_corrections": False
-            }
-            continue
-            
-        print(f"Checking element {i+1}/{len(structured_content)}: {element['type']} (ID: {element_id})")
-        
-        # Only send non-empty paragraphs to OpenAI
-        result = check_grammar_of_paragraph(content, element['type'])
-        
-        if result and 'corrected' in result:
-            # Store the result
-            corrections_map[element_id] = {
-                "original": content,
-                "corrected": result['corrected'],
-                "has_corrections": result['has_corrections'],
-                "explanation": result.get('explanation', '')
-            }
-            
-            # Add to corrections list if there were actual changes
-            if result['has_corrections']:
-                all_corrections.append({
-                    "id": element_id,
-                    "type": element['type'],
-                    "original": content,
-                    "corrected": result['corrected'],
-                    "explanation": result.get('explanation', '')
-                })
+    try:
+        if structured_content:
+            for i, item in enumerate(structured_content):
+                if checkpoint_handler:
+                    checkpoint_handler.update_progress(i / total_chunks)
+                    
+                if isinstance(item, dict) and 'content' in item:
+                    chunk_result = _check_text_chunk(item['content'])
+                    
+                    # Extract the actual corrections list from the result dictionary
+                    chunk_corrections = []
+                    if isinstance(chunk_result, dict) and 'corrections' in chunk_result:
+                        chunk_corrections = chunk_result['corrections']
+                    elif isinstance(chunk_result, list):
+                        chunk_corrections = chunk_result
+                        
+                    # Add ID to each correction
+                    if chunk_corrections:
+                        for corr in chunk_corrections:
+                            if isinstance(corr, dict):
+                                corr['id'] = item.get('id', f'p{i+1}')
+                        corrections.extend(chunk_corrections)
         else:
-            # If API call failed, keep original content
-            corrections_map[element_id] = {
-                "original": content,
-                "corrected": content,
-                "has_corrections": False
-            }
+            result = _check_text_chunk(text)
+            # Extract corrections list from the result dictionary
+            if isinstance(result, dict) and 'corrections' in result:
+                corrections = result['corrections']
+            else:
+                corrections = result if isinstance(result, list) else []
         
-        # Optional checkpoint saving - only if handler provided
         if checkpoint_handler:
-            checkpoint_handler.save_checkpoint(total_elements=len(structured_content), 
-                                              processed_elements=i+1, 
-                                              corrections=all_corrections)
+            checkpoint_handler.update_progress(1.0)
+            
+    except Exception as e:
+        print(f"Error in grammar checking: {e}")
+        if checkpoint_handler:
+            checkpoint_handler.update_progress(1.0)
     
-    # Rebuild full text with corrections
-    corrected_full_text = []
-    for i, element in enumerate(structured_content):
-        element_id = element.get('id', f'item{i}')
-        if element_id in corrections_map:
-            corrected_full_text.append(corrections_map[element_id]['corrected'])
-        else:
-            # Fallback to original content if not in map
-            corrected_full_text.append(element.get('content', ''))
-    
-    return {
-        "corrections": all_corrections,
-        "corrected_full_text": '\n' .join(corrected_full_text)
-    }
+    return corrections
 
 def check_grammar_full_text(content: str) -> List[Dict[str, Any]]:
     """
@@ -778,12 +757,29 @@ class CheckpointHandler:
         self.max_checkpoints = max_checkpoints
         self.keep_last = keep_last
         self.checkpoints = []
+        self.current_progress = 0.0
         
         # Create directory if it doesn't exist
         os.makedirs(base_dir, exist_ok=True)
         
         # Load existing checkpoints
         self._find_existing_checkpoints()
+
+    def update_progress(self, progress_value):
+        """Update the current progress and save checkpoint if needed.
+        
+        Args:
+            progress_value: Float between 0 and 1 indicating progress
+        """
+        self.current_progress = max(0.0, min(1.0, float(progress_value)))
+        
+        # Save checkpoint at certain progress intervals (e.g., every 10%)
+        progress_percent = int(self.current_progress * 100)
+        if progress_percent % 10 == 0:  # Save at every 10% progress
+            self.save_checkpoint(
+                total_elements=100,
+                processed_elements=progress_percent
+            )
     
     def _find_existing_checkpoints(self):
         """Find existing checkpoint files and store them in memory."""
@@ -943,114 +939,72 @@ def parse_corrections(response, original_text):
         original_text: Original text that was checked
         
     Returns:
-        List of corrections
+        Dict with corrections list and corrected_full_text
     """
     try:
-        # Try to parse the response as JSON
+        # Parse and validate response
         if isinstance(response, str):
             try:
-                parsed_response = json.loads(response)
+                parsed = json.loads(response)
             except json.JSONDecodeError:
-                # If the response isn't valid JSON, try to extract JSON from it
-                # Look for JSON-like structure in the response
-                match = re.search(r'\{.*\}', response, re.DOTALL)
-                if match:
-                    try:
-                        json_str = match.group(0)
-                        parsed_response = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        print(f"Could not parse response as JSON: {response[:200]}...")
-                        return []
-                else:
-                    print(f"No JSON structure found in response: {response[:200]}...")
-                    return []
+                print("Invalid JSON response received")
+                return {"corrections": [], "corrected_full_text": original_text}
         else:
-            # Response is already parsed
-            parsed_response = response
+            parsed = response
         
-        # Handle different response formats
-        corrections = []
-        corrected_full_text = None
+        # Ensure we have a proper dictionary
+        if not isinstance(parsed, dict):
+            print(f"Expected dict response, got {type(parsed)}")
+            return {"corrections": [], "corrected_full_text": original_text}
         
-        if isinstance(parsed_response, dict):
-            # Extract corrections from the response
-            if 'corrections' in parsed_response:
-                corrections = parsed_response['corrections']
-            elif 'changes' in parsed_response:
-                # Convert from language_processor format
-                corrections = []
-                for change in parsed_response['changes']:
-                    if 'original' in change and 'corrected' in change:
-                        correction = {
-                            'original': change['original'],
-                            'corrected': change['corrected'],
-                            'explanation': change.get('explanation', '')
-                        }
-                        corrections.append(correction)
-            else:
-                # No corrections found
-                print("No corrections field found in response")
-                return []
-                
-            # Save the corrected full text if available
-            if 'corrected_full_text' in parsed_response:
-                corrected_full_text = parsed_response['corrected_full_text']
-                
-        elif isinstance(parsed_response, list):
-            # Response is already a list of corrections
-            corrections = parsed_response
-        else:
-            # Unknown response format
-            print(f"Unknown response format: {type(parsed_response)}")
-            return []
+        # Extract and validate corrections
+        corrections = parsed.get('corrections', [])
+        if not isinstance(corrections, list):
+            print(f"Expected corrections to be list, got {type(corrections)}")
+            corrections = []
         
-        # Validate corrections
+        # Validate each correction
         valid_corrections = []
-        for correction in corrections:
-            if not isinstance(correction, dict):
-                print(f"Invalid correction (not a dict): {correction}")
+        for i, corr in enumerate(corrections):
+            if not isinstance(corr, dict):
+                print(f"Invalid correction {i+1}: not a dictionary")
                 continue
                 
-            if 'original' not in correction or 'corrected' not in correction:
-                print(f"Correction missing required fields: {correction}")
+            if 'original' not in corr or 'corrected' not in corr:
+                print(f"Invalid correction {i+1}: missing required fields")
                 continue
+            
+            # Ensure all fields are strings
+            corr['original'] = str(corr['original'])
+            corr['corrected'] = str(corr['corrected'])
+            if 'explanation' in corr:
+                corr['explanation'] = str(corr['explanation'])
                 
-            # Ensure the original text exists in the document
-            original = correction['original']
-            if original in original_text:
-                valid_corrections.append(correction)
+            # Only include corrections where original text exists in document
+            if corr['original'] in original_text:
+                valid_corrections.append(corr)
             else:
-                # Try fuzzy matching if exact match fails
-                print(f"Original text not found in document: '{original}'")
-                
-                # Add fuzzy matching here if needed
+                print(f"Warning: Original text '{corr['original']}' not found in document")
         
-        # If we have valid corrections but no corrected_full_text, ensure we create it
-        if valid_corrections and not corrected_full_text:
-            try:
-                # Try to import from utils.text_utils
-                from utils.text_utils import generate_full_text_from_corrections
-                corrected_full_text = generate_full_text_from_corrections(valid_corrections)
-            except ImportError:
-                # Fallback to a simple replacement approach
-                corrected_full_text = original_text
-                for correction in valid_corrections:
-                    corrected_full_text = corrected_full_text.replace(
-                        correction['original'], correction['corrected']
-                    )
+        # Get or generate corrected full text
+        corrected_full_text = parsed.get('corrected_full_text', original_text)
+        if not corrected_full_text or not isinstance(corrected_full_text, str):
+            corrected_full_text = original_text
+            # Apply corrections to generate full text
+            for corr in valid_corrections:
+                corrected_full_text = corrected_full_text.replace(
+                    corr['original'], 
+                    corr['corrected']
+                )
         
-        # Return corrections with corrected_full_text
-        if valid_corrections:
-            return {
-                "corrections": valid_corrections,
-                "corrected_full_text": corrected_full_text or original_text
-            }
-        return valid_corrections
+        return {
+            "corrections": valid_corrections,
+            "corrected_full_text": corrected_full_text
+        }
+        
     except Exception as e:
-        print(f"Error parsing corrections: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+        print(f"Error parsing corrections: {str(e)}")
+        return {"corrections": [], "corrected_full_text": original_text}
 
 def split_into_chunks(text, chunk_size):
     """Split text into chunks of approximately equal size.
@@ -1094,3 +1048,45 @@ def split_into_chunks(text, chunk_size):
         chunks.append('\n\n'.join(current_chunk))
     
     return chunks
+
+def _check_text_chunk(text):
+    """Check grammar of a single text chunk.
+    
+    Args:
+        text: Text chunk to check
+        
+    Returns:
+        Dict containing corrections and corrected_full_text
+    """
+    from .prompts import get_grammar_prompt
+    
+    # Skip empty chunks
+    if not text or not text.strip():
+        return {
+            'corrections': [],
+            'corrected_full_text': text
+        }
+    
+    try:
+        # Create prompt for this chunk
+        prompt = get_grammar_prompt(text)
+        
+        # Get corrections from AI
+        response = call_openai_api(prompt)
+        
+        # Parse corrections from response
+        parsed = parse_corrections(response, text)
+        if not isinstance(parsed, dict):
+            # Convert legacy format to dict
+            return {
+                'corrections': parsed if isinstance(parsed, list) else [],
+                'corrected_full_text': text
+            }
+        return parsed
+        
+    except Exception as e:
+        print(f"Error checking text chunk: {e}")
+        return {
+            'corrections': [],
+            'corrected_full_text': text
+        }
